@@ -1,72 +1,33 @@
-# 🔴 Gemini RedTeam CLI
+# 🔴 Gemini RedTeam Agent
 
-> **Real Claude Code CLI** repurposed as a **Red Team AI assistant**
-> Powered by **Gemini 2.0 Flash** — keyless, no API required.
+Autonomous AI-powered penetration testing agent using Gemini (keyless) + Tor rotating IPs.
 
----
+## Phases
+1. 🔍 **Recon** — DNS, WHOIS, headers, tech stack, WAF, subdomains
+2. 📡 **Scan** — Ports, directories, JS files, API endpoints
+3. 🎯 **Vuln Hunt** — SQLi, XSS, IDOR, SSRF, misconfigs, secrets
+4. 💥 **Confirm** — PoC for each finding, severity rating
+5. 📝 **Report** — Full markdown report with evidence
 
-## ⚡ Install & Run
+## Usage
 
 ```bash
-git clone https://github.com/Youssefzdb/gemini-redteam
-cd gemini-redteam
-npm install -g @anthropic-ai/claude-code
-chmod +x start.sh && bash start.sh
+# Standalone
+node agent.mjs "https://target.com"
+
+# Inside Claude Code CLI (via gemini-proxy)
+ANTHROPIC_BASE_URL=http://localhost:9099 claude
+# then ask: "run a full pentest on https://target.com using agent.mjs"
 ```
 
----
+## Controls (type anytime while running)
+- Any text → inject as guidance to the agent
+- `findings` → show current findings
+- `stop` → halt and save report
 
-## 🎯 What it does
-
-This is Claude Code with a **Red Team system prompt** injected at the proxy level.
-Every conversation is automatically primed for offensive security work:
-
-- 🔍 **Recon & OSINT** — target enumeration, passive intel gathering
-- 🌐 **Web exploitation** — SQLi, XSS, SSRF, path traversal, LFI/RFI
-- 🔓 **Privilege escalation** — Linux/Windows privesc paths
-- 🐚 **Payload generation** — reverse shells, bind shells, encoded payloads
-- 🔬 **Vulnerability research** — CVE analysis, PoC development
-- 📡 **Network attacks** — port scanning, service fingerprinting, MITM
-- 🏴 **Post-exploitation** — lateral movement, persistence, exfiltration
-- 🧪 **Malware analysis** — static/dynamic analysis, deobfuscation
-
----
-
-## 🏗️ Architecture
-
-```
-You → Claude Code CLI (real binary)
-           ↓
-   [redteam-proxy.mjs :7777]   ← injects Red Team system prompt
-           ↓
-   Gemini 2.0 Flash (keyless)
-           ↓
-   Response → Claude Code UI ✅
-```
-
----
-
-## 📁 Files
-
-| File | Description |
-|------|-------------|
-| `start.sh` | Launch everything |
-| `redteam-proxy.mjs` | Proxy with Red Team system prompt |
-| `CLAUDE.md` | Red Team context file (auto-loaded by Claude Code) |
-
----
-
-## 💡 Example prompts
-
-```
-❯ perform recon on target.com — enumerate subdomains, ports, and tech stack
-❯ generate a Python reverse shell for Linux — no detection evasion needed
-❯ analyze this binary for suspicious behavior: [paste strings output]
-❯ write a SQL injection payload for login bypass
-❯ enumerate privesc vectors on this Linux box
-❯ create a phishing page mimicking Microsoft login
-```
-
----
-
-> ⚠️ **For authorized penetration testing and CTF use only.**
+## Features
+- 🧅 Tor integration — auto IP rotation every 2 min
+- 🔄 Self-healing — fixes failed commands automatically  
+- 📊 Progress reports every 5-6 steps
+- 📄 Auto-generates markdown pentest report
+- ⚡ No API keys needed — keyless Gemini endpoint
