@@ -1,36 +1,34 @@
 #!/bin/bash
-# 🔴 Gemini RedTeam CLI — Launcher
-# Usage: bash start.sh [port]
+# 🔴 Gemini RedTeam — One command launcher
 
-PORT=${1:-7777}
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+TARGET="${1:-}"
+cd "$(dirname "$0")"
 
-# Check if port is busy
-if lsof -ti:$PORT >/dev/null 2>&1; then
-  echo -e "${YELLOW}⚠️  Port $PORT is busy.${NC}"
-  echo -e "Choose a different port: ${GREEN}bash start.sh 8888${NC}"
-  echo -e "Or kill it first:        ${RED}kill \$(lsof -ti:$PORT)${NC}"
-  echo ""
-  read -p "Enter port number to use: " CUSTOM_PORT
-  PORT=${CUSTOM_PORT:-8888}
+echo ""
+echo "╔══════════════════════════════════════════╗"
+echo "║   🔴 GEMINI REDTEAM — PENTEST AGENT     ║"
+echo "╚══════════════════════════════════════════╝"
+echo ""
+
+if [ -z "$TARGET" ]; then
+  read -p "🎯 Target URL: " TARGET
 fi
 
-echo -e "${RED}🔴 Starting RedTeam proxy on port $PORT...${NC}"
-node "$(dirname "$0")/redteam-proxy.mjs" $PORT &
-PROXY_PID=$!
-sleep 1.5
+echo "🎯 Target: $TARGET"
+echo ""
 
-if ! kill -0 $PROXY_PID 2>/dev/null; then
-  echo "❌ Proxy failed to start"; exit 1
-fi
+# تثبيت الأدوات الأساسية
+echo "📦 Checking deps..."
+which tor    >/dev/null 2>&1 || apt-get install -y tor netcat-openbsd -qq
+which nmap   >/dev/null 2>&1 || apt-get install -y nmap -qq
+which ffuf   >/dev/null 2>&1 || apt-get install -y ffuf -qq
+which whatweb>/dev/null 2>&1 || apt-get install -y whatweb -qq
+which nikto  >/dev/null 2>&1 || apt-get install -y nikto -qq
+which sqlmap >/dev/null 2>&1 || apt-get install -y sqlmap -qq
+which wafw00f>/dev/null 2>&1 || pip3 install wafw00f -q 2>/dev/null
 
-echo -e "${GREEN}✅ RedTeam proxy ready on port $PORT!${NC}"
-echo -e "${RED}💀 Launching Claude Code (Red Team mode)...${NC}\n"
+echo "✅ Deps ready"
+echo ""
 
-ANTHROPIC_API_KEY=redteam-keyless \
-ANTHROPIC_BASE_URL=http://127.0.0.1:$PORT \
-CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-DISABLE_AUTOUPDATER=1 \
-node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs "$@"
-
-kill $PROXY_PID 2>/dev/null || true
+# شغّل الـ agent مباشرة
+exec node agent.mjs "$TARGET"
