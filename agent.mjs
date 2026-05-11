@@ -1,22 +1,14 @@
 #!/usr/bin/env node
-/**
- * ╔══════════════════════════════════════════════════════════════╗
- * ║   Gemini RedTeam Autonomous Agent                            ║
- * ║   Plan → Execute → Analyze → Repeat until done              ║
- * ╚══════════════════════════════════════════════════════════════╝
- */
-
 import https from 'node:https'
 import querystring from 'node:querystring'
 import { execSync } from 'node:child_process'
 import fs from 'node:fs'
 import readline from 'node:readline'
 
-const MAX_STEPS = 20          // max iterations before stopping
-const STEP_DELAY = 2000       // ms between steps
+const MAX_STEPS = 20
+const STEP_DELAY = 2000
 const LOG_FILE = `redteam_${Date.now()}.log`
 
-// ── Colors ─────────────────────────────────────────────────────────────────
 const C = {
   red:    s => `\x1b[31m${s}\x1b[0m`,
   green:  s => `\x1b[32m${s}\x1b[0m`,
@@ -26,11 +18,22 @@ const C = {
   gray:   s => `\x1b[90m${s}\x1b[0m`,
 }
 
-// ── Logger ─────────────────────────────────────────────────────────────────
 function log(msg, color = null) {
   const line = color ? color(msg) : msg
   console.log(line)
   fs.appendFileSync(LOG_FILE, msg + '\n')
+}
+
+// ── FIX: Strip Markdown link formatting from commands ─────────────────────
+function sanitizeCommand(cmd) {
+  if (!cmd) return cmd
+  // Convert [text](url) → url
+  cmd = cmd.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$2')
+  // Remove any remaining [ ] around URLs
+  cmd = cmd.replace(/\[https?:\/\/[^\]]+\]/g, m => m.slice(1, -1))
+  // Remove backtick wrappers
+  cmd = cmd.replace(/^`+|`+$/g, '')
+  return cmd.trim()
 }
 
 // ── Gemini Engine ──────────────────────────────────────────────────────────
@@ -109,7 +112,8 @@ async function askGemini(prompt, retries = 3) {
 }
 
 // ── Tool Executor ──────────────────────────────────────────────────────────
-function runCommand(cmd) {
+function runCommand(rawCmd) {
+  const cmd = sanitizeCommand(rawCmd)
   try {
     const out = execSync(cmd, {
       timeout: 30000,
@@ -124,12 +128,10 @@ function runCommand(cmd) {
   }
 }
 
-// ── Parse JSON from Gemini response ───────────────────────────────────────
 function parseJSON(text) {
-  // Try to extract JSON from the response
   const patterns = [
     /```json\s*([\s\S]*?)```/,
-    /```\s*([\s\S]*?)```/,
+    /```\s*(\{[\s\S]*?\})\s*```/,
     /(\{[\s\S]*\})/,
   ]
   for (const p of patterns) {
@@ -143,27 +145,30 @@ function parseJSON(text) {
 }
 
 // ── System Prompt ──────────────────────────────────────────────────────────
-const SYSTEM = `You are an autonomous Red Team AI agent.
-You work in a loop: you think, execute one command, analyze the result, then decide the next step.
+const SYSTEM = `You are an autonomous Red Team AI agent running on Kali Linux.
+You work in a loop: think → run one command → analyze output → next step.
 
-RULES:
-1. Always respond with VALID JSON only — no markdown, no explanation outside JSON
-2. JSON format:
+CRITICAL RULES:
+1. Respond with VALID JSON ONLY — no markdown outside the JSON
+2. The "command" field must be a RAW bash command — NO markdown, NO brackets, NO [text](url) formatting
+3. Write URLs as plain text: https://example.com NOT [https://example.com](https://example.com)
+4. One command per step
+5. JSON format:
 {
-  "thought": "what you're thinking and why",
-  "command": "the exact bash command to run (or null if done)",
-  "analysis": "what you learned from the last output",
-  "next_goal": "what you'll do next",
-  "findings": ["finding 1", "finding 2"],
+  "thought": "reasoning",
+  "command": "raw bash command here",
+  "analysis": "what last output tells you",
+  "next_goal": "next action",
+  "findings": ["finding1"],
   "done": false,
-  "summary": "final summary (only when done=true)"
+  "summary": "final report (only when done=true)"
 }
-3. One command per step — keep it focused
-4. When you have enough information or found something important, set done=true
-5. Commands must work on Kali Linux
-6. Be systematic: recon → scan → enumerate → test → report
 
-Target and task will be provided by the user.`
+EXAMPLE of correct command field:
+"command": "dig +short ai-tunisien.base44.app && curl -sI https://ai-tunisien.base44.app"
+
+WRONG (never do this):
+"command": "curl -sI [https://ai-tunisien.base44.app](https://ai-tunisien.base44.app)"`
 
 // ── Main Agent Loop ────────────────────────────────────────────────────────
 async function runAgent(task) {
@@ -174,122 +179,96 @@ async function runAgent(task) {
   log(`${'═'.repeat(60)}\n`, C.red)
 
   const history = []
-  let lastOutput = 'No output yet — starting now.'
-  let stepFindings = []
+  let lastOutput = 'No output yet.'
   let allFindings = []
+  let failStreak = 0
 
   for (let step = 1; step <= MAX_STEPS; step++) {
     log(`\n${'─'.repeat(50)}`, C.gray)
     log(`  📍 STEP ${step}/${MAX_STEPS}`, C.cyan)
     log(`${'─'.repeat(50)}`, C.gray)
 
-    // Build context for Gemini
-    const historyText = history.slice(-4).map(h =>
-      `Step ${h.step}: ${h.thought}\nCommand: ${h.command || 'none'}\nOutput: ${h.output?.slice(0,300) || ''}`
+    const historyText = history.slice(-3).map(h =>
+      `Step ${h.step}:\nThought: ${h.thought}\nCommand: ${h.command || 'none'}\nOutput: ${(h.output || '').slice(0, 200)}`
     ).join('\n\n')
 
     const prompt = `${SYSTEM}
 
 TASK: ${task}
 
-HISTORY (last steps):
-${historyText || 'No history yet.'}
+PREVIOUS STEPS:
+${historyText || 'None yet.'}
 
-LAST COMMAND OUTPUT:
-${lastOutput.slice(0, 1000)}
+LAST OUTPUT:
+${lastOutput.slice(0, 800)}
 
-FINDINGS SO FAR:
-${allFindings.length > 0 ? allFindings.map((f,i) => `${i+1}. ${f}`).join('\n') : 'None yet.'}
+FINDINGS:
+${allFindings.length > 0 ? allFindings.join('\n') : 'None yet.'}
 
-Step ${step} — respond with JSON:`
+Now respond with JSON for step ${step}:`
 
-    log(`  🤔 Asking Gemini...`, C.gray)
+    log(`  🤔 Thinking...`, C.gray)
     const raw = await askGemini(prompt)
     const parsed = parseJSON(raw)
 
     if (!parsed) {
-      log(`  ⚠️  Could not parse JSON, retrying...`, C.yellow)
-      log(`  Raw: ${raw.slice(0, 200)}`, C.gray)
+      failStreak++
+      log(`  ⚠️  JSON parse failed (${failStreak}/3)`, C.yellow)
+      if (failStreak >= 3) { log('  ❌ Too many failures, stopping.', C.red); break }
       continue
     }
+    failStreak = 0
 
-    // Display thought
-    if (parsed.thought) {
-      log(`\n  💭 ${C.bold('THOUGHT:')} ${parsed.thought}`, null)
-    }
-    if (parsed.analysis) {
-      log(`  🔍 ${C.bold('ANALYSIS:')} ${parsed.analysis}`, null)
-    }
+    if (parsed.thought) log(`\n  💭 ${C.bold('THOUGHT:')} ${parsed.thought}`)
+    if (parsed.analysis && parsed.analysis !== 'No output yet.') log(`  🔍 ${C.bold('ANALYSIS:')} ${parsed.analysis}`)
 
-    // Execute command
     let output = ''
     if (parsed.command) {
-      log(`\n  ⚡ ${C.bold('EXECUTING:')} ${C.green(parsed.command)}`, null)
-      output = runCommand(parsed.command)
-      const preview = output.slice(0, 500)
-      log(`\n  📤 ${C.bold('OUTPUT:')}`, null)
+      const cleanCmd = sanitizeCommand(parsed.command)
+      log(`\n  ⚡ ${C.bold('EXEC:')} ${C.green(cleanCmd)}`)
+      output = runCommand(cleanCmd)
+      const preview = output.slice(0, 600)
+      log(`\n  📤 ${C.bold('OUTPUT:')}`)
       log(preview.split('\n').map(l => `     ${l}`).join('\n'), C.cyan)
-      if (output.length > 500) log(`     ... (${output.length} chars total)`, C.gray)
+      if (output.length > 600) log(`     ... (${output.length} total chars)`, C.gray)
     }
 
-    // Save findings
-    if (parsed.findings && parsed.findings.length > 0) {
+    if (parsed.findings?.length > 0) {
       for (const f of parsed.findings) {
         if (!allFindings.includes(f)) {
           allFindings.push(f)
-          log(`\n  🚨 ${C.bold('FINDING:')} ${C.yellow(f)}`, null)
+          log(`\n  🚨 ${C.bold('FINDING:')} ${C.yellow(f)}`)
         }
       }
     }
 
-    // Save to history
-    history.push({
-      step, thought: parsed.thought, command: parsed.command,
-      output: output, analysis: parsed.analysis, findings: parsed.findings
-    })
-    lastOutput = output || 'Command returned no output.'
+    history.push({ step, thought: parsed.thought, command: sanitizeCommand(parsed.command), output, analysis: parsed.analysis })
+    lastOutput = output || 'No output.'
 
-    // Check if done
     if (parsed.done) {
       log(`\n${'═'.repeat(60)}`, C.green)
-      log(`  ✅ AGENT COMPLETED TASK`, C.green)
+      log(`  ✅ MISSION COMPLETE`, C.green)
       log(`${'═'.repeat(60)}`, C.green)
-      if (parsed.summary) {
-        log(`\n  📋 FINAL REPORT:\n`, C.bold)
-        log(parsed.summary, null)
-      }
-      log(`\n  🚨 ALL FINDINGS (${allFindings.length}):`, C.yellow)
+      if (parsed.summary) { log(`\n  📋 REPORT:\n`); log(parsed.summary) }
+      log(`\n  🚨 FINDINGS (${allFindings.length}):`, C.yellow)
       allFindings.forEach((f, i) => log(`     ${i+1}. ${f}`, C.yellow))
-      log(`\n  📁 Full log saved: ${LOG_FILE}\n`, C.gray)
+      log(`\n  📁 Log: ${LOG_FILE}\n`, C.gray)
       break
     }
 
-    if (parsed.next_goal) {
-      log(`\n  🎯 ${C.bold('NEXT:')} ${parsed.next_goal}`, null)
-    }
-
+    if (parsed.next_goal) log(`\n  🎯 ${C.bold('NEXT:')} ${parsed.next_goal}`)
     await new Promise(r => setTimeout(r, STEP_DELAY))
   }
 
-  // Save full report
-  const report = {
-    task, date: new Date().toISOString(),
-    steps: history.length, findings: allFindings,
-    history
-  }
-  fs.writeFileSync(LOG_FILE.replace('.log', '_report.json'), JSON.stringify(report, null, 2))
-  log(`\n  💾 JSON report saved: ${LOG_FILE.replace('.log', '_report.json')}`, C.gray)
+  fs.writeFileSync(LOG_FILE.replace('.log','_report.json'), JSON.stringify({ task, findings: allFindings, history }, null, 2))
+  log(`\n  💾 Report: ${LOG_FILE.replace('.log','_report.json')}`, C.gray)
 }
 
-// ── CLI Entry ──────────────────────────────────────────────────────────────
+// ── Entry ──────────────────────────────────────────────────────────────────
 const task = process.argv.slice(2).join(' ')
-
 if (!task) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-  rl.question(C.red('\n🔴 Enter target/task: '), (answer) => {
-    rl.close()
-    runAgent(answer.trim())
-  })
+  rl.question(C.red('\n🔴 Enter target/task: '), answer => { rl.close(); runAgent(answer.trim()) })
 } else {
   runAgent(task)
 }
