@@ -1,20 +1,19 @@
 #!/usr/bin/env node
 /**
- * 🔴 Gemini RedTeam — Self-Healing Interactive Agent
- * - Detects and fixes its own errors
- * - Interactive: asks user when stuck or needs input
- * - No step limit — runs until user says stop/done
+ * 🔴 Gemini RedTeam — Self-Healing Interactive Agent v3
+ * - Context compression every 8 steps (prevents prompt overflow)
+ * - Self-healing errors
+ * - Fully interactive
  */
 
 import https from 'node:https'
 import querystring from 'node:querystring'
-import { execSync, spawnSync } from 'node:child_process'
+import { execSync } from 'node:child_process'
 import fs from 'node:fs'
 import readline from 'node:readline'
 
 const LOG = `session_${Date.now()}.log`
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-
 const C = {
   red:    s => `\x1b[31m${s}\x1b[0m`,
   green:  s => `\x1b[32m${s}\x1b[0m`,
@@ -22,34 +21,24 @@ const C = {
   cyan:   s => `\x1b[36m${s}\x1b[0m`,
   bold:   s => `\x1b[1m${s}\x1b[0m`,
   gray:   s => `\x1b[90m${s}\x1b[0m`,
-  reset:  s => `\x1b[0m${s}\x1b[0m`,
 }
 
-function write(msg) { fs.appendFileSync(LOG, msg + '\n') }
-function p(msg, color) { const o = color ? color(msg) : msg; console.log(o); write(msg) }
+function w(msg) { fs.appendFileSync(LOG, msg + '\n') }
+function p(msg, color) { console.log(color ? color(msg) : msg); w(msg) }
 
-// ── Ask user a question and wait for response ─────────────────────────────
-function askUser(question) {
-  return new Promise(resolve => {
-    rl.question(C.yellow(`\n❓ ${question}\n> `), answer => resolve(answer.trim()))
-  })
+function askUser(q) {
+  return new Promise(resolve => rl.question(C.yellow(`\n❓ ${q}\n> `), a => resolve(a.trim())))
 }
 
-// ── Sanitize commands — remove ALL markdown artifacts ────────────────────
 function clean(cmd) {
   if (!cmd) return ''
-  // [text](url) → url
   cmd = cmd.replace(/\[([^\]]*)\]\(([^)]+)\)/g, '$2')
-  // bare [url] → url
   cmd = cmd.replace(/\[([^\]]+)\]/g, '$1')
-  // backticks
   cmd = cmd.replace(/`/g, '')
-  // html entities
-  cmd = cmd.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+  cmd = cmd.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>')
   return cmd.trim()
 }
 
-// ── Execute with smart error detection ────────────────────────────────────
 function exec(rawCmd) {
   const cmd = clean(rawCmd)
   p(`\n  ⚡ ${C.bold('EXEC:')} ${C.green(cmd)}`)
@@ -65,22 +54,22 @@ function exec(rawCmd) {
   }
 }
 
-// ── Gemini API ─────────────────────────────────────────────────────────────
+// ── Gemini ─────────────────────────────────────────────────────────────────
 function buildPayload(prompt) {
   const inner = [[prompt,0,null,null,null,null,0],['en-US'],
     ['','','',null,null,null,null,null,null,''],'','',null,[0],1,null,null,1,0,
     null,null,null,null,null,[[0]],0]
-  return querystring.stringify({'f.req': JSON.stringify([null,JSON.stringify(inner)])}) + '&'
+  return querystring.stringify({'f.req':JSON.stringify([null,JSON.stringify(inner)])})+'&'
 }
 
 function parseGemini(text) {
-  text = text.replace(")]}'", '')
+  text = text.replace(")]}'","")
   let best = ''
   for (const line of text.split('\n')) {
     if (!line.includes('wrb.fr')) continue
     try {
       const data = JSON.parse(line)
-      const entries = data[0]==='wrb.fr' ? [data] : (Array.isArray(data) ? data.filter(i=>Array.isArray(i)&&i[0]==='wrb.fr') : [])
+      const entries = data[0]==='wrb.fr'?[data]:(Array.isArray(data)?data.filter(i=>Array.isArray(i)&&i[0]==='wrb.fr'):[])
       for (const e of entries) {
         try {
           const inner = JSON.parse(e[2])
@@ -100,10 +89,12 @@ function parseGemini(text) {
 }
 
 async function gemini(prompt) {
+  // Hard limit prompt size to prevent Empty responses
+  const safe = prompt.length > 8000 ? prompt.slice(0, 8000) + '\n\nRespond with JSON:' : prompt
   for (let i = 0; i < 3; i++) {
     try {
       return await new Promise((resolve, reject) => {
-        const payload = buildPayload(prompt.slice(0, 12000))
+        const payload = buildPayload(safe)
         const req = https.request({
           hostname: 'gemini.google.com',
           path: '/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate',
@@ -142,94 +133,103 @@ function parseJSON(text) {
   return null
 }
 
-// ── System Prompt ──────────────────────────────────────────────────────────
-const SYSTEM = `You are an autonomous Red Team AI agent on Kali Linux.
-You are SELF-HEALING: when a command fails, you analyze WHY and fix it yourself.
-You are INTERACTIVE: when you need user input or want to report something, use action="ask_user" or action="report".
+// ── Context Compressor — prevents prompt overflow ─────────────────────────
+async function compressHistory(history, findings, task) {
+  p(`\n  🗜️  Compressing context (${history.length} steps)...`, C.gray)
+  const summary = history.map(h =>
+    `Step ${h.step}: ${h.cmd||'no-cmd'} → ${(h.output||'').slice(0,100)}`
+  ).join('\n')
 
-RESPONSE FORMAT — always valid JSON:
-{
-  "thought": "your internal reasoning",
-  "action": "run_command" | "ask_user" | "report" | "done",
-  "command": "raw bash command (ONLY plain text URLs, NO markdown)",
-  "message": "message to show user (for ask_user/report/done)",
-  "analysis": "analysis of last output",
-  "findings": ["finding1", "finding2"],
-  "fix_applied": "what you changed to fix the last error (if any)"
+  const prompt = `Summarize this Red Team session history in 3-5 bullet points.
+Task: ${task}
+History:\n${summary}\nFindings so far: ${findings.join(', ')}
+Give a concise summary of what was done and what was learned. Plain text, no JSON.`
+
+  const result = await gemini(prompt)
+  return result || `Completed ${history.length} steps. Key findings: ${findings.slice(0,5).join(', ')}`
 }
 
-SELF-HEALING RULES:
-- If command fails with syntax error → check for markdown artifacts, clean the command
-- If command not found → install it first (apt-get install -y <tool>)
-- If permission denied → try with sudo or find another way
-- If timeout → simplify the command or add timeout flags
-- NEVER repeat the exact same failing command twice — always modify it
+const SYSTEM = `You are an autonomous Red Team AI agent on Kali Linux.
+SELF-HEALING: when a command fails, analyze WHY and fix it yourself. Never repeat the same failing command.
+INTERACTIVE: use action="ask_user" or action="report" to communicate with the user.
 
-URL RULES — CRITICAL:
-- ALWAYS write URLs as plain text: https://example.com
-- NEVER use markdown: [https://example.com](https://example.com) ← THIS BREAKS BASH
-- NEVER use brackets around URLs
+RESPONSE — always valid JSON:
+{
+  "thought": "reasoning (brief)",
+  "action": "run_command" | "ask_user" | "report" | "done",
+  "command": "raw bash — NO markdown, plain URLs only: https://example.com",
+  "message": "message to user (for ask_user/report/done)",
+  "analysis": "what last output means",
+  "findings": ["new finding"],
+  "fix_applied": "what you fixed from last error"
+}
 
-INTERACTIVE RULES:
-- Use action="ask_user" when you need credentials, scope clarification, or are stuck after 3 attempts
-- Use action="report" to share important findings and wait for user to say continue
-- Use action="done" only when the user explicitly says to stop`
+URL RULE — CRITICAL: write https://example.com NOT [text](https://example.com)
+SELF-HEAL: syntax error → remove markdown. command not found → apt-get install -y <tool>. permission denied → sudo.
+Use action="report" every 5-6 steps to update the user on progress.`
 
-// ── Main Agent ─────────────────────────────────────────────────────────────
+// ── Main ───────────────────────────────────────────────────────────────────
 async function run(task) {
-  p(`\n${'═'.repeat(62)}`, C.red)
-  p(`  🔴 GEMINI REDTEAM — SELF-HEALING INTERACTIVE AGENT`, C.red)
+  p(`\n${'═'.repeat(60)}`, C.red)
+  p(`  🔴 GEMINI REDTEAM AGENT v3 — Self-Healing + Interactive`, C.red)
   p(`  Task: ${task}`, C.yellow)
   p(`  Log:  ${LOG}`, C.gray)
-  p(`${'═'.repeat(62)}\n`, C.red)
-  p(`  Type 'stop' anytime to halt | 'findings' to see all findings`, C.gray)
+  p(`  Commands: 'stop' | 'findings' | 'status'`, C.gray)
+  p(`${'═'.repeat(60)}\n`, C.red)
 
-  const history = []
+  let history = []
+  let compressedSummary = ''
   const findings = []
   let lastOutput = 'No output yet.'
-  let lastCmd = ''
+  let stopped = false
   let failCount = 0
   let step = 0
+  let lastOk = true
 
-  // Check for user interrupt in background
-  let stopped = false
+  // User commands listener
+  process.stdin.resume()
   rl.on('line', line => {
     const l = line.trim().toLowerCase()
-    if (l === 'stop' || l === 'exit' || l === 'quit') {
-      stopped = true
-      p('\n  🛑 Stopping agent...', C.red)
-    }
+    if (l === 'stop' || l === 'exit') { stopped = true }
     if (l === 'findings') {
       p(`\n  🚨 FINDINGS (${findings.length}):`, C.yellow)
       findings.forEach((f,i) => p(`     ${i+1}. ${f}`, C.yellow))
     }
+    if (l === 'status') p(`  📍 Step ${step} | Findings: ${findings.length} | Last: ${lastOk?'✅':'❌'}`, C.cyan)
   })
 
   while (!stopped) {
     step++
-    p(`\n${'─'.repeat(50)}`, C.gray)
-    p(`  📍 STEP ${step}`, C.cyan)
-    p(`${'─'.repeat(50)}`, C.gray)
 
-    const ctx = history.slice(-4).map(h =>
-      `[Step ${h.step}] CMD: ${h.cmd||'none'}\nOUT: ${(h.output||'').slice(0,300)}\nSTATUS: ${h.ok?'OK':'FAILED'}`
-    ).join('\n\n')
+    // ── Compress context every 8 steps ────────────────────────────────────
+    if (step % 8 === 1 && history.length >= 8) {
+      compressedSummary = await compressHistory(history, findings, task)
+      history = history.slice(-3) // keep only last 3 raw steps
+      p(`\n  🗜️  Context compressed. Continuing...`, C.cyan)
+    }
+
+    p(`\n${'─'.repeat(48)}`, C.gray)
+    p(`  📍 STEP ${step}`, C.cyan)
+
+    // Build compact context
+    const recentCtx = history.slice(-3).map(h =>
+      `[S${h.step}] CMD:${h.cmd||'none'} STATUS:${h.ok?'OK':'FAILED'}\nOUT:${(h.output||'').slice(0,200)}`
+    ).join('\n')
 
     const prompt = `${SYSTEM}
 
 TASK: ${task}
+${compressedSummary ? `\nSESSION SUMMARY SO FAR:\n${compressedSummary}` : ''}
 
-CONTEXT (last steps):
-${ctx || 'No history.'}
+RECENT STEPS:
+${recentCtx || 'None yet.'}
 
-LAST OUTPUT:
-${lastOutput.slice(0, 1000)}
+LAST OUTPUT (${lastOk?'SUCCESS':'FAILED'}):
+${lastOutput.slice(0, 600)}
 
-LAST COMMAND STATUS: ${lastCmd ? (history[history.length-1]?.ok ? '✅ SUCCESS' : '❌ FAILED') : 'N/A'}
+FINDINGS: ${findings.slice(-10).join(' | ') || 'none'}
 
-FINDINGS SO FAR: ${findings.length > 0 ? findings.join(' | ') : 'none'}
-
-Step ${step} — respond with JSON:`
+Step ${step} — JSON:`
 
     p(`  🤔 Thinking...`, C.gray)
     const raw = await gemini(prompt)
@@ -237,82 +237,74 @@ Step ${step} — respond with JSON:`
 
     if (!parsed) {
       failCount++
-      p(`  ⚠️  Could not parse response (fail ${failCount})`, C.yellow)
+      p(`  ⚠️  Parse failed (${failCount}/4)`, C.yellow)
       if (failCount >= 4) {
-        const retry = await askUser('Agent seems stuck. Give it a new direction or type "stop":')
-        if (retry.toLowerCase() === 'stop') break
-        lastOutput = `User says: ${retry}`
+        // Auto-reset context and retry
+        p(`  🔄 Auto-resetting context...`, C.yellow)
+        compressedSummary = `Task: ${task}. Found so far: ${findings.slice(0,8).join(', ')}. Continuing recon.`
+        history = []
+        lastOutput = 'Context was reset due to connection issues. Continue the task.'
         failCount = 0
+
+        // Ask user if 2nd time
+        if (failCount === 0 && step > 15) {
+          const r = await askUser('Gemini connection issues. New direction or "stop"?')
+          if (r.toLowerCase() === 'stop') break
+          lastOutput = `User: ${r}`
+        }
       }
       continue
     }
     failCount = 0
 
-    // Show thought
     if (parsed.thought) p(`\n  💭 ${parsed.thought}`, C.gray)
     if (parsed.fix_applied) p(`  🔧 FIX: ${parsed.fix_applied}`, C.yellow)
-    if (parsed.analysis && parsed.analysis !== 'No output yet.') p(`  🔍 ${parsed.analysis}`)
+    if (parsed.analysis && !parsed.analysis.includes('No output')) p(`  🔍 ${parsed.analysis}`)
 
     // Handle action
-    switch (parsed.action) {
+    if (parsed.action === 'run_command') {
+      if (!parsed.command) { p('  ⚠️  No command', C.yellow); continue }
+      const result = exec(parsed.command)
+      lastOutput = result.output
+      lastOk = result.ok
+      const preview = result.output.slice(0, 600)
+      p(`\n  📤 OUTPUT:`)
+      p(preview.split('\n').map(l=>`     ${l}`).join('\n'), result.ok ? C.cyan : C.red)
+      if (result.output.length > 600) p(`     ... +${result.output.length-600} chars`, C.gray)
+      history.push({ step, cmd: result.cmd, output: result.output, ok: result.ok })
 
-      case 'run_command': {
-        if (!parsed.command) { p('  ⚠️  No command provided', C.yellow); break }
-        const result = exec(parsed.command)
-        lastCmd = result.cmd
-        lastOutput = result.output
-        const preview = result.output.slice(0, 700)
-        p(`\n  📤 OUTPUT:`)
-        p(preview.split('\n').map(l=>`     ${l}`).join('\n'), result.ok ? C.cyan : C.red)
-        if (result.output.length > 700) p(`     ... (+${result.output.length-700} chars)`, C.gray)
-        history.push({ step, cmd: result.cmd, output: result.output, ok: result.ok })
-        break
-      }
+    } else if (parsed.action === 'ask_user') {
+      p(`\n  🤖 ${C.bold('AGENT:')} ${parsed.message||'Need input.'}`)
+      const ans = await askUser('Your response (or "stop"):')
+      if (ans.toLowerCase() === 'stop') { stopped = true; break }
+      lastOutput = `User: ${ans}`
+      lastOk = true
+      history.push({ step, cmd: null, output: lastOutput, ok: true })
 
-      case 'ask_user': {
-        p(`\n  🤖 ${C.bold('AGENT:')} ${parsed.message || 'I need input.'}`)
-        const answer = await askUser('Your response:')
-        if (answer.toLowerCase() === 'stop') { stopped = true; break }
-        lastOutput = `User answered: ${answer}`
-        history.push({ step, cmd: null, output: lastOutput, ok: true })
-        break
-      }
+    } else if (parsed.action === 'report') {
+      p(`\n${'━'.repeat(55)}`, C.yellow)
+      p(`  📊 PROGRESS REPORT — Step ${step}`, C.bold)
+      p(`${'━'.repeat(55)}`, C.yellow)
+      p(parsed.message || '')
+      p(`${'━'.length > 0 ? '━'.repeat(55) : ''}`, C.yellow)
+      if (parsed.findings?.length) parsed.findings.forEach(f => { if(!findings.includes(f)) findings.push(f); p(`  🚨 ${f}`, C.yellow) })
+      const cont = await askUser('Continue? (yes / stop / new instruction):')
+      if (cont.toLowerCase() === 'stop') { stopped = true; break }
+      lastOutput = `User: ${cont}`
+      if (cont.toLowerCase() !== 'yes' && cont.length > 2) task = cont
+      history.push({ step, cmd: null, output: lastOutput, ok: true })
 
-      case 'report': {
-        p(`\n${'━'.repeat(55)}`, C.yellow)
-        p(`  📊 AGENT REPORT — Step ${step}`, C.bold)
-        p(`${'━'.repeat(55)}`, C.yellow)
-        p(parsed.message || '')
-        if (parsed.findings?.length > 0) {
-          for (const f of parsed.findings) {
-            if (!findings.includes(f)) { findings.push(f); p(`  🚨 ${f}`, C.yellow) }
-          }
-        }
-        p(`${'━'.repeat(55)}\n`, C.yellow)
-        const cont = await askUser('Continue? (yes/no/new task):')
-        if (cont.toLowerCase() === 'no' || cont.toLowerCase() === 'stop') { stopped = true; break }
-        if (cont.length > 3 && cont.toLowerCase() !== 'yes') task = cont
-        lastOutput = `User said: ${cont}`
-        history.push({ step, cmd: null, output: lastOutput, ok: true })
-        break
-      }
-
-      case 'done': {
-        p(`\n${'═'.repeat(62)}`, C.green)
-        p(`  ✅ AGENT COMPLETE`, C.green)
-        p(`${'═'.repeat(62)}`, C.green)
-        if (parsed.message) p(`\n${parsed.message}`)
-        if (parsed.findings?.length > 0) parsed.findings.forEach(f => { if (!findings.includes(f)) findings.push(f) })
-        stopped = true
-        break
-      }
-
-      default:
-        p(`  ❓ Unknown action: ${parsed.action}`, C.yellow)
+    } else if (parsed.action === 'done') {
+      p(`\n${'═'.repeat(60)}`, C.green)
+      p(`  ✅ MISSION COMPLETE`, C.green)
+      p(`${'═'.repeat(60)}`, C.green)
+      if (parsed.message) p(`\n${parsed.message}`)
+      if (parsed.findings?.length) parsed.findings.forEach(f => { if(!findings.includes(f)) findings.push(f) })
+      stopped = true
     }
 
-    // Save findings
-    if (parsed.findings?.length > 0) {
+    // Save new findings
+    if (parsed.findings?.length) {
       for (const f of parsed.findings) {
         if (!findings.includes(f)) { findings.push(f); p(`\n  🚨 ${C.bold('FINDING:')} ${C.yellow(f)}`) }
       }
@@ -321,23 +313,21 @@ Step ${step} — respond with JSON:`
     await new Promise(r => setTimeout(r, 1500))
   }
 
-  // Final summary
-  p(`\n${'═'.repeat(62)}`, C.red)
+  // Final report
+  p(`\n${'═'.repeat(60)}`, C.red)
   p(`  📋 SESSION SUMMARY — ${step} steps`, C.bold)
-  p(`${'═'.repeat(62)}`, C.red)
-  p(`  🚨 Total Findings: ${findings.length}`, C.yellow)
+  p(`${'═'.repeat(60)}`, C.red)
+  p(`  🚨 Findings (${findings.length}):`, C.yellow)
   findings.forEach((f,i) => p(`     ${i+1}. ${f}`, C.yellow))
   p(`  📁 Log: ${LOG}\n`, C.gray)
-
-  fs.writeFileSync(LOG.replace('.log','_report.json'), JSON.stringify({task, steps:step, findings, history}, null, 2))
+  fs.writeFileSync(LOG.replace('.log','_report.json'), JSON.stringify({task,steps:step,findings,history},null,2))
   rl.close()
   process.exit(0)
 }
 
-// Entry
 const task = process.argv.slice(2).join(' ')
 if (!task) {
-  rl.question(C.red('\n🔴 Enter target/task: '), t => { run(t.trim()) })
+  rl.question(C.red('\n🔴 Target/task: '), t => run(t.trim()))
 } else {
   run(task)
 }
