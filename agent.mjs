@@ -44,7 +44,7 @@ function buildPayload(prompt) {
   const inner=[[prompt,0,null,null,null,null,0],['en-US'],
     ['','','',null,null,null,null,null,null,''],'','',null,[0],1,null,null,1,0,
     null,null,null,null,null,[[0]],0]
-  return querystring.stringify({'f.req':JSON.stringify([null,JSON.stringify(inner)])})+' &'
+  return querystring.stringify({'f.req':JSON.stringify([null,JSON.stringify(inner)])})+'&'
 }
 
 function parseGemini(text) {
