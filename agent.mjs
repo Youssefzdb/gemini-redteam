@@ -1,14 +1,8 @@
 #!/usr/bin/env node
 /**
- * 🔴 Gemini RedTeam — Full Pentest Autonomous Agent
- * Runs inside Claude Code CLI via gemini-proxy OR standalone
- * 
- * Phases:
- *   1. Recon       — DNS, headers, tech, subdomains
- *   2. Scan        — ports, dirs, endpoints, JS secrets
- *   3. Vuln Hunt   — SQLi, XSS, IDOR, SSRF, misconfigs
- *   4. Confirm     — PoC for each finding
- *   5. Report      — structured markdown report
+ * 🔴 Gemini RedTeam — Smart Autonomous Pentest Agent
+ * يثبت الأدوات التي يحتاجها تلقائياً
+ * 5 phases: Recon → Scan → Vuln Hunt → Confirm → Report
  */
 import querystring from 'node:querystring'
 import { execSync } from 'node:child_process'
@@ -16,7 +10,8 @@ import fs from 'node:fs'
 import readline from 'node:readline'
 
 const LOG   = `pentest_${Date.now()}.log`
-const RPORT = `pentest_${Date.now()}_report.md`
+const RFILE = `pentest_${Date.now()}_report.md`
+const sleep = ms => new Promise(r=>setTimeout(r,ms))
 
 const C = {
   red:    s=>`\x1b[31m${s}\x1b[0m`,
@@ -28,53 +23,50 @@ const C = {
   magenta:s=>`\x1b[35m${s}\x1b[0m`,
   blue:   s=>`\x1b[34m${s}\x1b[0m`,
 }
-const w = msg => fs.appendFileSync(LOG, msg+'\n')
-const p = (msg,c) => { console.log(c?c(msg):msg); w(msg) }
-const sleep = ms => new Promise(r=>setTimeout(r,ms))
+const w   = msg => fs.appendFileSync(LOG, msg+'\n')
+const p   = (msg,c) => { console.log(c?c(msg):msg); w(msg) }
 
-// ── User input non-blocking ────────────────────────────────────────────────
+// ── Non-blocking user input ────────────────────────────────────────────────
 let userMessage = null
-let stopped = false
+let stopped     = false
 const rl = readline.createInterface({input:process.stdin})
 rl.on('line', line => {
   const l = line.trim()
-  if (!l) return
+  if(!l) return
   const low = l.toLowerCase()
-  if (low==='stop'||low==='exit') { stopped=true; p('\n  🛑 Stopping agent...',C.red); return }
-  if (low==='findings'||low==='vulns') return
+  if(low==='stop'||low==='exit'){ stopped=true; p('\n  🛑 Stopping...',C.red); return }
+  if(low==='findings'||low==='vulns') return
   userMessage = l
-  p(`\n  📨 ${C.bold('USER →')} "${l}" — injecting next step`,C.magenta)
+  p(`\n  📨 ${C.bold('USER →')} "${l}"`,C.magenta)
 })
 
 // ── Tor ────────────────────────────────────────────────────────────────────
-let torReady = false
+let torReady  = false
 let lastRotate = Date.now()
 const ROTATE_MS = 2*60*1000
 
 function setupTor() {
   try {
     try { execSync('which tor',{stdio:'ignore'}) }
-    catch { execSync('apt-get install -y tor netcat-openbsd 2>/dev/null',{stdio:'ignore'}) }
+    catch { execSync('apt-get install -y tor netcat-openbsd -qq 2>/dev/null',{stdio:'ignore'}) }
     try {
-      const torrc='/etc/tor/torrc'
-      let conf=''; try{conf=fs.readFileSync(torrc,'utf8')}catch{}
-      if(!conf.includes('ControlPort 9051'))
-        fs.appendFileSync(torrc,'\nControlPort 9051\nCookieAuthentication 0\n')
-      execSync('service tor restart 2>/dev/null || systemctl restart tor 2>/dev/null',{stdio:'ignore'})
+      const rc='/etc/tor/torrc'; let c=''; try{c=fs.readFileSync(rc,'utf8')}catch{}
+      if(!c.includes('ControlPort 9051')) fs.appendFileSync(rc,'\nControlPort 9051\nCookieAuthentication 0\n')
+      execSync('service tor restart 2>/dev/null||systemctl restart tor 2>/dev/null',{stdio:'ignore'})
       execSync('sleep 6',{stdio:'ignore'})
     } catch {}
     const ip=execSync('curl -s --socks5 127.0.0.1:9050 --max-time 10 https://api.ipify.org 2>/dev/null').toString().trim()
-    if(ip&&ip.length<20){torReady=true;p(`  ✅ Tor — Exit IP: ${ip}`,C.green)}
-    else p('  ⚠️  Tor not ready — direct connection',C.yellow)
-  } catch { p('  ⚠️  Tor setup failed',C.yellow) }
+    if(ip&&ip.length<20){ torReady=true; p(`  ✅ Tor — IP: ${ip}`,C.green) }
+    else p('  ⚠️  Tor unavailable — direct',C.yellow)
+  } catch { p('  ⚠️  Tor failed',C.yellow) }
 }
 
 function rotateIp() {
   try {
-    execSync(`echo -e 'AUTHENTICATE ""\r\nSIGNAL NEWNYM\r\nQUIT' | nc 127.0.0.1 9051 2>/dev/null||true`)
+    execSync(`printf 'AUTHENTICATE ""\r\nSIGNAL NEWNYM\r\nQUIT\r\n' | nc -q1 127.0.0.1 9051 2>/dev/null||true`)
     lastRotate=Date.now()
     const ip=execSync('curl -s --socks5 127.0.0.1:9050 --max-time 8 https://api.ipify.org 2>/dev/null').toString().trim()
-    p(`  🔄 New Tor IP: ${ip}`,C.cyan)
+    p(`  🔄 New IP: ${ip}`,C.cyan)
   } catch {}
 }
 
@@ -128,13 +120,13 @@ async function gemini(prompt) {
         {maxBuffer:5*1024*1024,timeout:50000}
       ).toString()
       try{fs.unlinkSync(pf)}catch{}
-      if(raw.includes('302 Moved')||raw.includes('sorry')||raw.length<100) {
+      if(raw.includes('302 Moved')||raw.includes('sorry')||raw.length<100){
         p(`  🔄 IP blocked — rotating`,C.yellow)
         if(torReady){rotateIp();await sleep(4000)}
         continue
       }
-      const result=parseGemini(raw)
-      if(result) return result
+      const r=parseGemini(raw)
+      if(r) return r
     } catch(e) {
       p(`  ⚠️  retry ${i+1}: ${e.message.slice(0,50)}`,C.gray)
       if(torReady&&i===1){rotateIp();await sleep(3000)}
@@ -157,14 +149,22 @@ function parseJSON(text) {
 
 function clean(cmd) {
   if(!cmd) return ''
-  return cmd.replace(/\[([^\]]*)\]\(([^)]+)\)/g,'$2').replace(/\[([^\]]+)\]/g,'$1').replace(/`/g,'').trim()
+  return cmd
+    .replace(/\[([^\]]*)\]\(([^)]+)\)/g,'$2')
+    .replace(/\[([^\]]+)\]/g,'$1')
+    .replace(/`/g,'').trim()
 }
 
 function runCmd(rawCmd) {
   const cmd=clean(rawCmd)
   p(`\n  ⚡ ${C.bold('EXEC:')} ${C.green(cmd)}`)
   try {
-    const o=execSync(cmd,{timeout:60000,maxBuffer:10*1024*1024,shell:'/bin/bash',env:{...process.env,TERM:'xterm'}}).toString().trim()
+    const o=execSync(cmd,{
+      timeout:90000,
+      maxBuffer:10*1024*1024,
+      shell:'/bin/bash',
+      env:{...process.env,TERM:'xterm',DEBIAN_FRONTEND:'noninteractive',PATH:process.env.PATH+':/root/go/bin:/usr/local/go/bin'}
+    }).toString().trim()
     return {ok:true,output:o||'(no output)',cmd}
   } catch(e) {
     const o=(e.stdout?.toString()||'')+(e.stderr?.toString()||'')
@@ -172,293 +172,191 @@ function runCmd(rawCmd) {
   }
 }
 
-// ── Install tools ──────────────────────────────────────────────────────────
-function installTools() {
-  p('\n  📦 Checking tools...', C.cyan)
-  const tools = [
-    ['nmap',    'nmap'],
-    ['curl',    'curl'],
-    ['whatweb', 'whatweb'],
-    ['ffuf',    'ffuf'],
-    ['nikto',   'nikto'],
-    ['sqlmap',  'sqlmap'],
-    ['nuclei',  'nuclei'],
-    ['subfinder','subfinder'],
-    ['httpx',   'httpx-toolkit'],
-    ['wafw00f', 'wafw00f'],
-    ['gau',     'golang-go'],
-  ]
-  for(const [bin,pkg] of tools) {
-    try { execSync(`which ${bin}`,{stdio:'ignore'}); p(`  ✅ ${bin}`,C.gray) }
-    catch {
-      p(`  📥 Installing ${bin}...`,C.yellow)
-      try { execSync(`apt-get install -y ${pkg} 2>/dev/null`,{stdio:'ignore'}) }
-      catch { p(`  ⚠️  ${bin} not installed`,C.gray) }
-    }
-  }
-  // nuclei via go if not found
-  try { execSync('which nuclei',{stdio:'ignore'}) }
-  catch {
-    try {
-      execSync('go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest 2>/dev/null',{stdio:'ignore',timeout:60000})
-      execSync('cp ~/go/bin/nuclei /usr/local/bin/ 2>/dev/null||true',{stdio:'ignore'})
-    } catch {}
-  }
+// ── System prompt ──────────────────────────────────────────────────────────
+function buildPrompt(phase, target, step, lastOut, lastOk, ctx, findings, userCtx) {
+  return `You are an elite autonomous Red Team AI agent running on Kali Linux.
+You perform a full professional penetration test in 5 phases.
+
+CURRENT PHASE: ${phase} / 5
+TARGET: ${target}
+STEP: ${step}${userCtx}
+
+CRITICAL RULES:
+- Respond ONLY with valid JSON — nothing else
+- NEVER stop to ask the user anything
+- If a tool is missing: install it yourself with apt-get or pip3 or go install
+- Fix any failed command automatically with a better approach
+- Use plain bash commands — NO markdown, NO brackets around URLs
+- Move to next phase when current phase objectives are complete
+- After phase 5 write the final report
+
+PHASES:
+1-RECON: Gather all info about target — DNS, WHOIS, HTTP headers, tech stack, WAF, subdomains, certificates, robots.txt, sitemap
+2-SCAN: Deep scan — all ports, directories/files bruteforce, JS file analysis, API endpoints, hidden params, error pages
+3-VULN-HUNT: Systematically test — SQLi, XSS, IDOR, SSRF, LFI, open redirect, misconfig, exposed secrets, weak auth, CORS
+4-CONFIRM: For each finding run a precise PoC to confirm it is real. Eliminate false positives. Rate: CRITICAL/HIGH/MEDIUM/LOW
+5-REPORT: Write complete markdown pentest report to file ${RFILE}
+
+JSON FORMAT:
+{
+  "thought": "what I am thinking",
+  "phase": <1-5>,
+  "action": "run_command" | "print" | "next_phase" | "done",
+  "command": "exact bash command to run",
+  "message": "text to display to user (for print/report)",
+  "findings": ["finding description SEVERITY"],
+  "analysis": "analysis of last output"
 }
 
-// ── Phases definition ──────────────────────────────────────────────────────
-const PHASES = [
-  { id:1, name:'🔍 RECON',         emoji:'🔍', desc:'DNS, WHOIS, headers, tech stack, WAF detection, subdomains' },
-  { id:2, name:'📡 SCAN',          emoji:'📡', desc:'Port scan, directory bruteforce, JS file analysis, API endpoint discovery' },
-  { id:3, name:'🎯 VULN HUNT',     emoji:'🎯', desc:'SQLi, XSS, IDOR, SSRF, open redirect, misconfigs, exposed secrets, LFI' },
-  { id:4, name:'💥 CONFIRM',       emoji:'💥', desc:'PoC for each finding, false positive elimination, severity rating' },
-  { id:5, name:'📝 REPORT',        emoji:'📝', desc:'Full structured markdown report with evidence and remediation' },
-]
+LAST COMMAND [${lastOk?'SUCCESS':'FAILED'}]:
+${lastOut.slice(0,400)}
 
-// ── System prompts per phase ───────────────────────────────────────────────
-function buildSYS(phase, target) {
-  const phaseGuide = {
-    1: `Run these recon commands:
-- curl -sI ${target}
-- whois $(echo ${target}|sed 's|https://||;s|/.*||')
-- dig +short $(echo ${target}|sed 's|https://||;s|/.*||') A AAAA MX TXT
-- whatweb -a 3 ${target}
-- wafw00f ${target}
-- subfinder -d $(echo ${target}|sed 's|https://||;s|/.*||') -silent 2>/dev/null || echo "subfinder unavailable"`,
-    2: `Run these scan commands:
-- nmap -sV -sC -T4 --top-ports 1000 $(echo ${target}|sed 's|https://||;s|/.*||')
-- ffuf -w /usr/share/wordlists/dirb/common.txt -u ${target}/FUZZ -mc 200,301,302,403 -t 50 -timeout 5
-- curl -s ${target} | grep -oE '(src|href)="[^"]*\\.js[^"]*"' | head -20
-- curl -s ${target} | grep -oE '/api/[^"\\s]+' | sort -u`,
-    3: `Test these vulnerabilities:
-- SQLi: curl -s "${target}/search?q=1'" | grep -i error
-- XSS: curl -s "${target}/?q=<script>alert(1)</script>" | grep -i script
-- IDOR: try /api/users/1 /api/users/2 /api/users/0
-- SSRF: curl -s "${target}/fetch?url=http://169.254.169.254/latest/meta-data/"
-- Open redirect: curl -sI "${target}/redirect?url=https://evil.com"
-- Headers: check missing Security-Headers, CORS misconfig
-- JS secrets: curl -s ${target} | grep -iE '(api_key|secret|token|password)=[^&"\\s]+'`,
-    4: `For each finding in the list, craft a specific PoC command to CONFIRM it is real (not false positive). Test carefully and record exact evidence (response code, body snippet). Rate each: CRITICAL/HIGH/MEDIUM/LOW`,
-    5: `Generate a complete penetration test report in markdown format with: Executive Summary, Findings table, Detailed findings with evidence, Remediation recommendations. Use all findings collected.`
-  }
-  return `Red Team AI on Kali Linux. AUTONOMOUS — never stop, never ask questions.
-Current phase: ${phase.name} — ${phase.desc}
-JSON response only:
-{"thought":"...","action":"run_command|print|next_phase|done","command":"bash cmd (plain text no markdown)","message":"text to display","findings":[],"analysis":"...","phase_complete":false}
+RECENT HISTORY:
+${ctx||'none'}
 
-action=next_phase: move to next phase when current is fully done
-action=print: display info/progress without stopping
-action=done: only after phase 5 report is written
+ALL FINDINGS SO FAR:
+${findings.length?findings.slice(-10).join('\n'):'none yet'}
 
-PHASE GUIDE:
-${phaseGuide[phase.id]||'Continue systematically'}
-
-Fix errors yourself. Try alternatives if tools missing. Never repeat same failing command.`
+Respond with JSON:`
 }
 
-// ── Report builder ─────────────────────────────────────────────────────────
-function buildReport(target, allFindings, phaseHistory) {
-  const date = new Date().toISOString().split('T')[0]
-  const critical = allFindings.filter(f=>f.includes('CRITICAL')||f.includes('critical'))
-  const high     = allFindings.filter(f=>f.includes('HIGH')||f.includes('high'))
-  const med      = allFindings.filter(f=>f.includes('MED')||f.includes('medium')||f.includes('Medium'))
-  const low      = allFindings.filter(f=>!critical.includes(f)&&!high.includes(f)&&!med.includes(f))
-
-  return `# 🔴 Penetration Test Report
-**Target:** ${target}
-**Date:** ${date}
-**Tool:** Gemini RedTeam Agent
-
----
-
-## Executive Summary
-Automated penetration test performed on ${target} using an autonomous AI-driven red team agent.
-Total findings: **${allFindings.length}** (${critical.length} Critical, ${high.length} High, ${med.length} Medium, ${low.length} Low/Info)
-
----
-
-## Findings Summary
-
-| # | Finding | Severity |
-|---|---------|----------|
-${allFindings.map((f,i)=>`| ${i+1} | ${f} | ${f.includes('CRITICAL')?'🔴 Critical':f.includes('HIGH')?'🟠 High':f.includes('MED')||f.includes('Medium')?'🟡 Medium':'🔵 Info'} |`).join('\n')}
-
----
-
-## Detailed Findings
-
-${allFindings.map((f,i)=>`### Finding ${i+1}: ${f}
-- **Evidence:** See log file ${LOG}
-- **Remediation:** Apply security patch, validate input, update headers as applicable
-`).join('\n')}
-
----
-
-## Phase History
-${Object.entries(phaseHistory).map(([ph,cmds])=>`### ${ph}\n${cmds.map(c=>`- \`${c}\``).join('\n')}`).join('\n\n')}
-
----
-*Generated by Gemini RedTeam Agent — ${new Date().toISOString()}*
-`
-}
-
-// ── Main agent ─────────────────────────────────────────────────────────────
+// ── Main ───────────────────────────────────────────────────────────────────
 async function agent(target) {
   p(`\n${'═'.repeat(62)}`,C.red)
-  p(`  🔴 GEMINI REDTEAM — FULL PENTEST AUTONOMOUS`,C.red)
-  p(`  Target: ${target}`,C.yellow)
-  p(`  Phases: Recon → Scan → Vuln Hunt → Confirm → Report`,C.cyan)
-  p(`  Log:    ${LOG}`,C.gray)
-  p(`  Type anytime: guidance message | 'stop' | 'findings'`,C.gray)
+  p(`  🔴 GEMINI REDTEAM — SMART AUTONOMOUS PENTEST`,C.red)
+  p(`  Target  : ${target}`,C.yellow)
+  p(`  Log     : ${LOG}`,C.gray)
+  p(`  Report  : ${RFILE}`,C.gray)
+  p(`  Controls: type anything to guide | 'findings' | 'stop'`,C.gray)
   p(`${'═'.repeat(62)}\n`,C.red)
 
-  installTools()
-
-  p('\n  🧅 Setting up Tor...', C.cyan)
+  p('  🧅 Starting Tor...',C.cyan)
   setupTor()
 
-  let allFindings  = []
-  let phaseHistory = {}
-  let history      = []
-  let lastOut      = `Target: ${target}. Starting recon.`
-  let lastOk       = true
-  let failCount    = 0
-  let step         = 0
-  let phaseIdx     = 0
+  const phaseNames = {
+    1:'🔍 RECON', 2:'📡 SCAN', 3:'🎯 VULN HUNT', 4:'💥 CONFIRM', 5:'📝 REPORT'
+  }
 
+  let phase    = 1
+  let history  = []
+  let findings = []
+  let lastOut  = `Starting pentest on ${target}`
+  let lastOk   = true
+  let failCount= 0
+  let step     = 0
+  let phaseStep= 0
+
+  // findings command
   rl.on('line', line => {
-    const l=line.trim().toLowerCase()
-    if(l==='findings'||l==='vulns') {
-      p(`\n  🚨 FINDINGS (${allFindings.length}):`,C.yellow)
-      allFindings.forEach((f,i)=>p(`  ${i+1}. ${f}`,C.yellow))
+    if(line.trim().toLowerCase()==='findings') {
+      p(`\n  🚨 FINDINGS (${findings.length}):`,C.yellow)
+      findings.forEach((f,i)=>p(`  ${i+1}. ${f}`,C.yellow))
     }
   })
 
-  while(!stopped && phaseIdx < PHASES.length) {
-    const phase = PHASES[phaseIdx]
-    if(!phaseHistory[phase.name]) phaseHistory[phase.name]=[]
-
+  // Print phase banner
+  const showPhase = (ph) => {
     p(`\n${'▓'.repeat(62)}`,C.blue)
-    p(`  ${phase.emoji} PHASE ${phase.id}/5: ${phase.name}`,C.bold)
-    p(`  ${phase.desc}`,C.gray)
+    p(`  ${phaseNames[ph]} — Phase ${ph}/5`,C.bold)
     p(`${'▓'.repeat(62)}\n`,C.blue)
+  }
 
-    let phaseSteps = 0
-    let phaseDone  = false
+  showPhase(phase)
 
-    while(!stopped && !phaseDone) {
-      step++; phaseSteps++
-      p(`\n${'─'.repeat(48)}`,C.gray)
-      p(`  📍 Step ${step} | Phase ${phase.id}/5 | ${phase.emoji} ${phase.name.split(' ')[1]}`,C.cyan)
+  while(!stopped && phase<=5) {
+    step++; phaseStep++
+    p(`\n${'─'.repeat(48)}`,C.gray)
+    p(`  📍 Step ${step} | ${phaseNames[phase]} ${torReady?'🧅':''}`,C.cyan)
 
-      // Inject user message if any
-      let userCtx=''
-      if(userMessage) {
-        userCtx=`\nUSER INSTRUCTION: ${userMessage}`
-        p(`  📨 User: "${userMessage}"`,C.magenta)
-        userMessage=null
-      }
+    let userCtx=''
+    if(userMessage){ userCtx=`\nUSER INSTRUCTION: ${userMessage}`; userMessage=null }
 
-      const ctx=history.slice(-3).map(h=>
-        `[${h.ok?'OK':'FAIL'}] ${(h.cmd||'').slice(0,60)}: ${(h.output||'').slice(0,120)}`
-      ).join('\n')
+    const ctx=history.slice(-4).map(h=>
+      `[${h.ok?'OK':'FAIL'}] ${(h.cmd||'').slice(0,70)}: ${(h.output||'').slice(0,150)}`
+    ).join('\n')
 
-      const prompt=`${buildSYS(phase,target)}
+    const prompt=buildPrompt(phase,target,step,lastOut,lastOk,ctx,findings,userCtx)
 
-Target: ${target}
-Phase: ${phase.id}/5 — ${phase.name}
-Phase steps so far: ${phaseSteps}${userCtx}
-Last[${lastOk?'OK':'FAIL'}]: ${lastOut.slice(0,300)}
-Recent:\n${ctx||'none'}
-All findings so far: ${allFindings.slice(-8).join(' | ')||'none'}
-JSON:`
+    p(`  🤔 Thinking...`,C.gray)
+    const raw=await gemini(prompt)
 
-      p(`  🤔 Thinking...`,C.gray)
-      const raw=await gemini(prompt)
-
-      if(!raw) {
-        failCount++
-        p(`  ⚠️  No response (${failCount})`,C.yellow)
-        if(failCount>=5){
-          p(`  🔄 Auto-reset`,C.yellow)
-          history=[]; lastOut=`Reset. Phase ${phase.id} continuing.`; failCount=0
-        }
-        await sleep(3000); continue
-      }
-      failCount=0
-
-      const parsed=parseJSON(raw)
-      if(!parsed){p(`  ⚠️  Bad JSON: ${raw.slice(0,80)}`,C.yellow);lastOut=raw.slice(0,200);continue}
-
-      if(parsed.thought) p(`\n  💭 ${parsed.thought}`,C.gray)
-      if(parsed.analysis?.length>5) p(`  🔍 ${parsed.analysis}`)
-
-      if(parsed.action==='run_command') {
-        if(!parsed.command){p('  ⚠️  no command',C.yellow);continue}
-        const res=runCmd(parsed.command)
-        lastOut=res.output; lastOk=res.ok
-        p(`\n  📤 OUTPUT:`)
-        p(res.output.slice(0,700).split('\n').map(l=>`     ${l}`).join('\n'),res.ok?C.cyan:C.red)
-        if(res.output.length>700) p(`     ...+${res.output.length-700} chars`,C.gray)
-        history.push({step,cmd:res.cmd,output:res.output,ok:res.ok})
-        phaseHistory[phase.name].push(res.cmd)
-
-      } else if(parsed.action==='print') {
-        p(`\n${'━'.repeat(52)}`,C.yellow)
-        p(`  📊 ${phase.emoji} Progress — Step ${step}`,C.bold)
-        p(parsed.message||'')
-        p(`${'━'.repeat(52)}`,C.yellow)
-        lastOut=`Progress update at step ${step}`; lastOk=true
-
-      } else if(parsed.action==='next_phase'||parsed.phase_complete) {
-        p(`\n  ✅ Phase ${phase.id} complete!`,C.green)
-        if(parsed.message) p(parsed.message,C.green)
-        phaseDone=true; phaseIdx++
-
-      } else if(parsed.action==='done') {
-        p(`\n  ✅ Agent done`,C.green)
-        if(parsed.message) p(parsed.message)
-        phaseDone=true; phaseIdx=PHASES.length
-      }
-
-      // Collect findings
-      if(parsed.findings?.length) {
-        for(const f of parsed.findings) {
-          if(!allFindings.includes(f)){
-            allFindings.push(f)
-            p(`\n  🚨 ${C.bold('FINDING:')} ${C.yellow(f)}`)
-          }
-        }
-      }
-
-      // Auto-advance phase after too many steps (safety)
-      if(phaseSteps>=20&&!phaseDone) {
-        p(`\n  ⏭️  Phase ${phase.id} max steps — moving to next phase`,C.yellow)
-        phaseDone=true; phaseIdx++
-      }
-
-      await sleep(1200)
+    if(!raw){
+      failCount++
+      p(`  ⚠️  No response (${failCount})`,C.yellow)
+      if(failCount>=5){ history=[]; lastOut=`Reset. Continuing phase ${phase}.`; failCount=0 }
+      await sleep(3000); continue
     }
+    failCount=0
+
+    const parsed=parseJSON(raw)
+    if(!parsed){ p(`  ⚠️  Bad JSON: ${raw.slice(0,100)}`,C.yellow); lastOut=raw.slice(0,300); continue }
+
+    // Show thinking
+    if(parsed.thought) p(`\n  💭 ${parsed.thought}`,C.gray)
+    if(parsed.analysis?.length>5) p(`  🔍 ${parsed.analysis}`)
+
+    // Collect findings
+    if(parsed.findings?.length) {
+      for(const f of parsed.findings) {
+        if(!findings.includes(f)){
+          findings.push(f)
+          p(`\n  🚨 ${C.bold('FINDING:')} ${C.yellow(f)}`)
+        }
+      }
+    }
+
+    // Handle action
+    if(parsed.action==='run_command') {
+      if(!parsed.command){ p('  ⚠️  no command',C.yellow); continue }
+      const res=runCmd(parsed.command)
+      lastOut=res.output; lastOk=res.ok
+      const preview=res.output.slice(0,700)
+      p(`\n  📤 OUTPUT:`)
+      p(preview.split('\n').map(l=>`     ${l}`).join('\n'), res.ok?C.cyan:C.red)
+      if(res.output.length>700) p(`     ...+${res.output.length-700} chars`,C.gray)
+      history.push({step,cmd:res.cmd,output:res.output.slice(0,300),ok:res.ok})
+
+    } else if(parsed.action==='print') {
+      p(`\n${'━'.repeat(52)}`,C.yellow)
+      p(`  📊 ${phaseNames[phase]} Update — Step ${step}`,C.bold)
+      p(parsed.message||'')
+      p(`${'━'.repeat(52)}`,C.yellow)
+      lastOut=`Printed at step ${step}`; lastOk=true
+
+    } else if(parsed.action==='next_phase'||parsed.phase===phase+1) {
+      p(`\n  ✅ ${phaseNames[phase]} complete!`,C.green)
+      if(parsed.message) p(parsed.message,C.green)
+      phase++; phaseStep=0
+      if(phase<=5) showPhase(phase)
+      lastOut=`Phase ${phase-1} done. Starting ${phaseNames[phase]||'report'}.`; lastOk=true
+
+    } else if(parsed.action==='done') {
+      p(`\n  ✅ Pentest complete`,C.green)
+      if(parsed.message) p(parsed.message)
+      phase=6; stopped=true
+    }
+
+    // Auto-advance safety
+    if(phaseStep>=25&&phase<5){
+      p(`\n  ⏭️  Phase ${phase} max steps — advancing`,C.yellow)
+      phase++; phaseStep=0
+      if(phase<=5) showPhase(phase)
+    }
+
+    await sleep(1200)
   }
 
-  // Write final report
-  if(!stopped) {
-    const report=buildReport(target,allFindings,phaseHistory)
-    fs.writeFileSync(RPORT,report)
-    p(`\n${'═'.repeat(62)}`,C.green)
-    p(`  ✅ PENTEST COMPLETE`,C.green)
-    p(`  🚨 Total findings: ${allFindings.length}`,C.yellow)
-    allFindings.forEach((f,i)=>p(`    ${i+1}. ${f}`,C.yellow))
-    p(`\n  📄 Report: ${RPORT}`,C.cyan)
-    p(`  📁 Log:    ${LOG}`,C.gray)
-    p(`${'═'.repeat(62)}\n`,C.green)
-  }
-
+  // Final summary
+  p(`\n${'═'.repeat(62)}`,C.red)
+  p(`  📋 PENTEST COMPLETE — ${step} steps | ${findings.length} findings`,C.bold)
+  findings.forEach((f,i)=>p(`  ${i+1}. ${f}`,C.yellow))
+  if(fs.existsSync(RFILE)) p(`\n  📄 Report saved: ${RFILE}`,C.cyan)
+  p(`  📁 Log: ${LOG}\n`,C.gray)
   rl.close(); process.exit(0)
 }
 
-const target=process.argv.slice(2).join(' ')
-if(!target) {
+const target=process.argv.slice(2).join(' ').trim()
+if(!target){
   process.stdout.write(C.red('\n🔴 Target URL: '))
-  rl.once('line',t=>agent(t.trim()))
+  rl.once('line',t=>{ if(t.trim()) agent(t.trim()) })
 } else agent(target)
