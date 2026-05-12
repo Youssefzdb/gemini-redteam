@@ -15,6 +15,54 @@ const LOG   = `pentest_${Date.now()}.log`
 const RFILE = `pentest_${Date.now()}_report.md`
 const sleep = ms => new Promise(r=>setTimeout(r,ms))
 
+// ── Session DB — يحفظ كل أمر ونتيجته ──────────────────────────────────────
+class SessionDB {
+  constructor(target) {
+    const host = target.replace(/https?:\/\//,'').replace(/[^a-zA-Z0-9]/g,'_').slice(0,40)
+    this.file = `db_${host}.json`
+    this.data = fs.existsSync(this.file)
+      ? JSON.parse(fs.readFileSync(this.file,'utf8'))
+      : { target, created: new Date().toISOString(), commands: {}, findings: [], confirmed: [] }
+    if(fs.existsSync(this.file))
+      p(`  📂 Loaded existing DB: ${this.file} (${Object.keys(this.data.commands).length} commands)`, C.cyan)
+  }
+
+  // تحقق هل نفّذنا هذا الأمر من قبل
+  has(cmd) {
+    const key = cmd.trim().slice(0,120)
+    return !!this.data.commands[key]
+  }
+
+  // احفظ الأمر ونتيجته
+  save(cmd, output, ok) {
+    const key = cmd.trim().slice(0,120)
+    this.data.commands[key] = { ok, output: output.slice(0,500), ts: Date.now() }
+    this._flush()
+  }
+
+  // احفظ finding
+  addFinding(f) {
+    if(!this.data.findings.includes(f)){ this.data.findings.push(f); this._flush() }
+  }
+
+  // احفظ confirmed vuln
+  addConfirmed(v) {
+    if(!this.data.confirmed.find(x=>x.name===v.name)){ this.data.confirmed.push(v); this._flush() }
+  }
+
+  // ملخص للـ prompt — آخر الأوامر وما تم اختباره
+  summary() {
+    const cmds = Object.entries(this.data.commands)
+    const last10 = cmds.slice(-10).map(([cmd,r])=>`[${r.ok?'OK':'FAIL'}] ${cmd}: ${r.output.slice(0,80)}`).join('\n')
+    const allCmds = cmds.map(([cmd])=>cmd).join('\n')
+    return { last10, allCmds, total: cmds.length }
+  }
+
+  _flush() {
+    fs.writeFileSync(this.file, JSON.stringify(this.data, null, 2))
+  }
+}
+
 const C = {
   red:    s=>`\x1b[31m${s}\x1b[0m`,
   green:  s=>`\x1b[32m${s}\x1b[0m`,
@@ -207,7 +255,7 @@ function runCmd(rawCmd) {
 }
 
 // ── System prompt ──────────────────────────────────────────────────────────
-function buildPrompt(target, step, mode, lastOut, lastOk, ctx, findings, confirmedVulns, userCtx) {
+function buildPrompt(target, step, mode, lastOut, lastOk, ctx, findings, confirmedVulns, userCtx, dbSummary) {
   const modeCtx = mode==='exploit'
     ? `⚔️  EXPLOIT MODE ACTIVE — You are in full exploitation mode.
 Your ONLY goal right now is to completely exploit the confirmed vulnerability.
@@ -269,6 +317,12 @@ ${confirmedVulns.length
 FINDINGS SO FAR:
 ${findings.length ? findings.slice(-10).join('\n') : 'none yet'}
 
+ALREADY EXECUTED COMMANDS (${dbSummary.total} total — DO NOT repeat these):
+${dbSummary.allCmds.slice(0,800)||'none yet'}
+
+LAST 10 RESULTS:
+${dbSummary.last10||'none yet'}
+
 JSON:`
 }
 
@@ -319,15 +373,21 @@ async function agent(target) {
   p(`  Log     : ${LOG}`,C.gray)
   p(`  Report  : ${RFILE}`,C.gray)
   p(`  Controls: type anything | 'findings' | 'stop'`,C.gray)
+  if(Object.keys(db.data.commands).length > 0) {
+    p(`\n  📂 Resuming from previous session (${Object.keys(db.data.commands).length} commands already done)`,C.cyan)
+    p(`  ⚡ Agent will skip already-executed commands`,C.gray)
+  }
   p(`${'═'.repeat(62)}\n`,C.red)
 
   p('  🧅 Starting Tor...',C.cyan)
   setupTor()
 
+  const db = new SessionDB(target)
+  // استرجع ما تم حفظه مسبقاً
   let mode          = 'hunt'   // 'hunt' | 'exploit'
   let history       = []
-  let findings      = []
-  let confirmedVulns= []
+  let findings      = [...db.data.findings]
+  let confirmedVulns= [...db.data.confirmed]
   let lastOut       = `Starting pentest on ${target}`
   let lastOk        = true
   let failCount     = 0
@@ -360,7 +420,8 @@ async function agent(target) {
     ).join('\n')
 
     p(`  🤔 Thinking...`,C.gray)
-    const raw=await gemini(buildPrompt(target,step,mode,lastOut,lastOk,ctx,findings,confirmedVulns,userCtx))
+    const dbSum=db.summary()
+    const raw=await gemini(buildPrompt(target,step,mode,lastOut,lastOk,ctx,findings,confirmedVulns,userCtx,dbSum))
 
     if(!raw){
       failCount++
@@ -380,7 +441,7 @@ async function agent(target) {
     // collect findings
     if(parsed.findings?.length)
       for(const f of parsed.findings)
-        if(!findings.includes(f)){ findings.push(f); p(`\n  🔎 ${C.yellow(f)}`) }
+        if(!findings.includes(f)){ findings.push(f); db.addFinding(f); p(`\n  🔎 ${C.yellow(f)}`) }
 
     // handle action
     if(parsed.action==='run_command'){
@@ -392,6 +453,7 @@ async function agent(target) {
       p(preview.split('\n').map(l=>`     ${l}`).join('\n'), res.ok?C.cyan:C.red)
       if(res.output.length>900) p(`     ...+${res.output.length-900} chars`,C.gray)
       history.push({step, cmd:res.cmd, output:res.output.slice(0,300), ok:res.ok})
+      db.save(res.cmd, res.output, res.ok)
 
     } else if(parsed.action==='print'){
       p(`\n${'━'.repeat(52)}`,C.yellow)
@@ -424,6 +486,7 @@ async function agent(target) {
       const vd=parsed.vuln_details
       if(!confirmedVulns.find(v=>v.name===vd.name&&v.evidence===vd.evidence)){
         confirmedVulns.push(vd)
+        db.addConfirmed(vd)
         const dec=await handleConfirmedVuln(vd)
         mode=dec.mode
         extraCtx=dec.instruction
