@@ -238,6 +238,33 @@ function clean(cmd) {
     .replace(/`/g,'').trim()
 }
 
+
+// ── تحقق من الأداة قبل التثبيت ────────────────────────────────────────────
+function toolExists(tool) {
+  try { execSync(`which ${tool} 2>/dev/null || ${tool} --version 2>/dev/null`, {stdio:'pipe', timeout:5000}); return true }
+  catch { return false }
+}
+
+function ensureTool(tool, installCmd) {
+  if(toolExists(tool)) {
+    p(`  ✅ ${tool} already installed`,C.gray)
+    return true
+  }
+  p(`  📦 Installing ${tool}...`,C.yellow)
+  try {
+    execSync(installCmd, {
+      stdio:'pipe', timeout:60000, shell:'/bin/bash',
+      env:{...process.env, DEBIAN_FRONTEND:'noninteractive',
+           PATH:process.env.PATH+':/root/go/bin:/usr/local/go/bin:/root/.local/bin'}
+    })
+    p(`  ✅ ${tool} installed`,C.green)
+    return true
+  } catch(e) {
+    p(`  ⚠️  Failed to install ${tool}: ${e.message.slice(0,60)}`,C.red)
+    return false
+  }
+}
+
 function runCmd(rawCmd) {
   const cmd=clean(rawCmd)
   p(`\n  ⚡ ${C.bold('EXEC:')} ${C.green(cmd)}`)
@@ -281,9 +308,14 @@ ${authCtx}${userCtx}
 ${modeCtx}
 
 TOOL RULES:
-1. NEVER run apt-get update
-2. Check tool exists first: which <tool> || <tool> --version
-3. Only install if missing: apt-get install -y -qq <tool> OR pip3 install -q OR go install
+1. NEVER run apt-get update — forbidden absolutely
+2. NEVER combine check+install+use in one command (no: which tool || install && use)
+3. ALWAYS split into separate steps:
+   Step A: which <tool> 2>/dev/null || echo "MISSING"
+   Step B (only if missing): apt-get install -y -qq <tool>  OR  pip3 install -q <tool>  OR  go install <pkg>@latest
+   Step C: run the tool
+4. Most tools exist on Kali — just run them directly, skip the check
+5. NEVER chain: which tool || install && use — this is forbidden
 
 JSON RESPONSE ONLY — no other text:
 {
