@@ -58,6 +58,7 @@ class SessionDB {
 // ── User input ─────────────────────────────────────────────────────────────
 let userMessage  = null
 let stopped      = false
+let paused       = false
 let waitingInput = false
 let inputResolve = null
 
@@ -65,8 +66,14 @@ const rl = readline.createInterface({ input: process.stdin })
 rl.on('line', line => {
   const l = line.trim()
   if (!l) return
-  if (l.toLowerCase() === 'stop' || l.toLowerCase() === 'exit') {
-    stopped = true; p('\n  🛑 Stopping...', C.red); return
+  if (l.toLowerCase() === 'exit' || l.toLowerCase() === 'quit') {
+    stopped = true; p('\n  🛑 Exiting...', C.red); return
+  }
+  if (l.toLowerCase() === 'stop' || l.toLowerCase() === 'pause') {
+    paused = true; p('\n  ⏸️  Paused — type anything to talk, then \'start\' to resume', C.yellow); return
+  }
+  if (l.toLowerCase() === 'start' || l.toLowerCase() === 'resume') {
+    paused = false; p('\n  ▶️  Resuming...', C.green); return
   }
   if (l.toLowerCase() === 'findings') return
   if (waitingInput && inputResolve) { inputResolve(l); waitingInput = false; inputResolve = null; return }
@@ -397,7 +404,7 @@ async function agent(target, scope, authCtx, notes) {
   p(`  Scope   : ${scope}`, C.cyan)
   p(`  Log     : ${LOG}`, C.gray)
   p(`  Report  : ${RFILE}`, C.gray)
-  p("  Controls: type anything | 'findings' | 'stop'", C.gray)
+  p("  Controls: 'stop'=pause | 'start'=resume | 'exit'=quit | 'findings' | type to chat", C.gray)
   p('═'.repeat(62) + '\n', C.red)
 
   p('  🧅 Starting Tor...', C.cyan)
@@ -429,6 +436,11 @@ async function agent(target, scope, authCtx, notes) {
   })
 
   while (!stopped) {
+    // pause loop — انتظر حتى start
+    while (paused && !stopped) {
+      await sleep(500)
+    }
+    if (stopped) break
     step++
     p('\n' + '─'.repeat(48), C.gray)
     const modeTag = mode === 'exploit' ? C.bg_red(' ⚔️  EXPLOIT ') : C.cyan('🔍 HUNT')
@@ -436,7 +448,25 @@ async function agent(target, scope, authCtx, notes) {
 
     let userCtx = ''
     if (extraCtx) { userCtx = extraCtx; extraCtx = '' }
-    if (userMessage) { userCtx += '\nUSER: ' + userMessage; userMessage = null }
+    if (userMessage) {
+      const um = userMessage; userMessage = null
+      if (paused) {
+        // رد على المستخدم وهو في pause
+        p(`\n  🤖 ${C.cyan('Agent (paused):')} Processing your message...`, C.cyan)
+        const reply = await gemini(
+          'You are a penetration testing AI assistant. The pentest is currently paused.\n' +
+          `Target: ${target}\n` +
+          `Confirmed vulns: ${confirmedVulns.map(v=>v.name).join(', ')||'none'}\n` +
+          `Findings: ${findings.slice(-5).join(', ')||'none'}\n\n` +
+          `User asks: ${um}\n\n` +
+          'Answer concisely. If user wants to change direction, acknowledge and they can type \'start\' to resume with new instructions.'
+        )
+        p(`  💬 ${reply || 'OK, noted. Type \'start\' to resume.'}`, C.cyan)
+        extraCtx = `USER INSTRUCTION (given during pause): ${um}`
+      } else {
+        userCtx += '\nUSER: ' + um
+      }
+    }
     if (notes) userCtx += '\nNOTES: ' + notes
 
     const ctx = history.slice(-5).map(h =>
