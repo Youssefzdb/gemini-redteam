@@ -63,10 +63,7 @@ const ROTATE_MS = 2*60*1000
 function setupTor() {
   try {
     try { execSync('which tor',{stdio:'ignore'}) }
-    catch {
-      // بدون apt-get update
-      execSync('apt-get install -y -qq tor netcat-openbsd 2>/dev/null',{stdio:'ignore'})
-    }
+    catch { execSync('apt-get install -y -qq tor netcat-openbsd 2>/dev/null',{stdio:'ignore'}) }
     try {
       const rc='/etc/tor/torrc'; let c=''; try{c=fs.readFileSync(rc,'utf8')}catch{}
       if(!c.includes('ControlPort 9051')) fs.appendFileSync(rc,'\nControlPort 9051\nCookieAuthentication 0\n')
@@ -218,9 +215,11 @@ PHASE OBJECTIVE:
 ${phaseDesc[phase]}
 
 STRICT RULES:
-1. NEVER run "apt-get update" — EVER. It wastes time. Use "apt-get install -y -qq <tool>" directly.
-2. NEVER run "apt-get update && apt-get install" — forbidden.
-3. To install tools use ONLY: apt-get install -y -qq <tool>  OR  pip3 install -q <tool>  OR  go install <pkg>@latest
+1. NEVER run "apt-get update" or "apt-get update && ..." — absolutely forbidden.
+2. BEFORE installing ANY tool: always check if it exists first with "which <tool>" or "<tool> --version"
+3. ONLY install if the tool is confirmed missing. Most tools already exist on Kali — check first.
+4. To install a missing tool: apt-get install -y -qq <tool>  OR  pip3 install -q <tool>  OR  go install <pkg>@latest
+5. NEVER reinstall a tool that already works.
 4. Never stop to ask the user — work autonomously
 5. Commands must be plain bash — no markdown, plain URLs only
 6. If command fails: think why and try a smarter approach
