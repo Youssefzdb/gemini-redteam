@@ -374,16 +374,16 @@ async function agent(target, scope='Full penetration test', authCtx='', notes=''
   p(`  Log     : ${LOG}`,C.gray)
   p(`  Report  : ${RFILE}`,C.gray)
   p(`  Controls: type anything | 'findings' | 'stop'`,C.gray)
-  if(Object.keys(db.data.commands).length > 0) {
-    p(`\n  📂 Resuming from previous session (${Object.keys(db.data.commands).length} commands already done)`,C.cyan)
-    p(`  ⚡ Agent will skip already-executed commands`,C.gray)
-  }
   p(`${'═'.repeat(62)}\n`,C.red)
 
   p('  🧅 Starting Tor...',C.cyan)
   setupTor()
 
   const db = new SessionDB(target)
+  if(Object.keys(db.data.commands).length > 0) {
+    p(`\n  📂 Resuming from previous session (${Object.keys(db.data.commands).length} commands already done)`,C.cyan)
+    p(`  ⚡ Agent will skip already-executed commands`,C.gray)
+  }
   // استرجع ما تم حفظه مسبقاً
   let mode          = 'hunt'   // 'hunt' | 'exploit'
   let history       = []
