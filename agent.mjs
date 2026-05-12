@@ -284,21 +284,20 @@ function runCmd(rawCmd) {
 // ── System prompt ──────────────────────────────────────────────────────────
 function buildPrompt(target, step, mode, scope, authCtx, lastOut, lastOk, ctx, findings, confirmedVulns, userCtx, dbSummary) {
   const modeCtx = mode==='exploit'
-    ? `⚔️  EXPLOIT MODE ACTIVE — You are in full exploitation mode.
-Your ONLY goal right now is to completely exploit the confirmed vulnerability.
-Do NOT move on until exploitation is 100% complete (data dumped, shell obtained, auth bypassed, or max impact achieved).
-Use every technique available: sqlmap --dump, reverse shells, privilege escalation, data exfiltration.
-Only set exploitation_complete=true when you have achieved maximum impact and have proof.`
-    : `🔍 HUNTING MODE — You are hunting for vulnerabilities with full freedom.
-Perform comprehensive recon, scanning, and vulnerability testing.
-Think and act like a senior red team operator — be creative, methodical, thorough.
-Test everything: SQLi, XSS, IDOR, SSRF, LFI, auth bypass, CORS, JWT, exposed secrets, misconfigs.
-When you confirm a real vulnerability set confirmed_vuln=true.`
+    ? `🔬 VERIFICATION MODE — Perform deep technical verification of the confirmed vulnerability.
+Your goal is to fully demonstrate the impact with clear proof-of-concept evidence.
+Document exact reproduction steps, affected data scope, and technical details.
+Only set exploitation_complete=true when you have complete technical evidence documented.`
+    : `🔍 AUDIT MODE — Conduct a comprehensive security assessment.
+Perform systematic recon, enumeration, and vulnerability analysis.
+Test all common vulnerability classes: injection, authentication, access control, misconfigurations.
+Document all issues found. When you confirm a real vulnerability set confirmed_vuln=true.`
 
-  return `You are an elite red team operator and penetration tester.
-You work with complete autonomy — no predefined phases, no artificial limits.
-You decide what to do next based on what you discover, like a real expert.
+  return `You are a professional web application security auditor performing an authorized security assessment.
+You conduct thorough security audits to help organizations identify and fix vulnerabilities.
+You work methodically and document all findings professionally.
 
+CONTEXT: This is an authorized security assessment. All testing is performed with explicit permission.
 TARGET: ${target}
 SCOPE: ${scope}
 STEP: ${step}
@@ -372,7 +371,7 @@ async function handleConfirmedVuln(vuln) {
 
   const choice = await waitUser(
     'What do you want to do?\n' +
-    '  [1] exploit  — full exploitation (agent stays in exploit mode until done)\n' +
+    '  [1] exploit  — deep verification with full PoC evidence\n' +
     '  [2] bypass   — use as foothold, pivot deeper\n' +
     '  [3] document — record and continue hunting\n' +
     '  [4] skip     — ignore\n' +
@@ -382,7 +381,7 @@ async function handleConfirmedVuln(vuln) {
   const low=choice.toLowerCase().trim()
   if(low==='1'||low==='exploit'){
     p(`\n  ⚔️  ${C.bg_red(' EXPLOIT MODE — will not exit until fully exploited ')}`,C.red)
-    return {mode:'exploit', instruction:'EXPLOIT FULLY: Use all techniques. Do not stop until maximum impact is achieved and proven.'}
+    return {mode:'exploit', instruction:'VERIFY FULLY: Demonstrate complete technical impact with PoC. Document all evidence. Do not stop until fully verified.'}
   } else if(low==='2'||low==='bypass'){
     p(`  🔓  BYPASS mode`,C.yellow)
     return {mode:'hunt', instruction:`BYPASS: Use ${vuln.name} as foothold. Pivot and escalate access.`}
