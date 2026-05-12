@@ -78,11 +78,26 @@ function setupTor() {
 
 function rotateIp() {
   try {
-    execSync(`printf 'AUTHENTICATE ""\r\nSIGNAL NEWNYM\r\nQUIT\r\n' | nc -q1 127.0.0.1 9051 2>/dev/null||true`)
+    let prevIp=''
+    try{prevIp=execSync('curl -s --socks5 127.0.0.1:9050 --max-time 5 https://api.ipify.org 2>/dev/null').toString().trim()}catch{}
+    try{execSync(`printf 'AUTHENTICATE ""
+SIGNAL NEWNYM
+QUIT
+' | nc -q1 127.0.0.1 9051 2>/dev/null||true`)}catch{}
+    let newIp=prevIp
+    for(let i=0;i<5;i++){
+      execSync('sleep 3')
+      try{newIp=execSync('curl -s --socks5 127.0.0.1:9050 --max-time 5 https://api.ipify.org 2>/dev/null').toString().trim()}catch{}
+      if(newIp&&newIp!==prevIp) break
+    }
+    if(newIp===prevIp||!newIp){
+      p(`  🔁 IP stuck — restarting tor...`,C.yellow)
+      try{execSync('service tor restart 2>/dev/null||systemctl restart tor 2>/dev/null',{stdio:'ignore'});execSync('sleep 8')}catch{}
+      try{newIp=execSync('curl -s --socks5 127.0.0.1:9050 --max-time 8 https://api.ipify.org 2>/dev/null').toString().trim()}catch{}
+    }
     lastRotate=Date.now()
-    const ip=execSync('curl -s --socks5 127.0.0.1:9050 --max-time 8 https://api.ipify.org 2>/dev/null').toString().trim()
-    p(`  🔄 New IP: ${ip}`,C.cyan)
-  } catch {}
+    p(`  🔄 ${prevIp||'?'} → ${newIp||'?'}`,C.cyan)
+  } catch(e){p(`  ⚠️  rotate: ${e.message.slice(0,40)}`,C.gray)}
 }
 
 // ── Gemini ─────────────────────────────────────────────────────────────────
@@ -118,12 +133,16 @@ async function gemini(prompt) {
   const inner=[[safe,0,null,null,null,null,0],['en-US'],
     ['','','',null,null,null,null,null,null,''],'','',null,[0],1,null,null,1,0,
     null,null,null,null,null,[[0]],0]
+  // encode payload as base64 to pass inline — avoids --data-binary file issues
   const payload=querystring.stringify({'f.req':JSON.stringify([null,JSON.stringify(inner)])})+'&'
-  const pf=`/tmp/gpl_${Date.now()}.bin`
-  fs.writeFileSync(pf,payload)
-  const proxy=torReady?'--socks5 127.0.0.1:9050':''
+  const payloadB64=Buffer.from(payload).toString('base64')
+
   for(let i=0;i<4;i++) {
+    const proxy=torReady?'--socks5 127.0.0.1:9050':''
     try {
+      // write fresh file each attempt to avoid stale/deleted file
+      const pf=`/tmp/gpl_${Date.now()}_${i}.bin`
+      fs.writeFileSync(pf,payload,'utf8')
       const raw=execSync(
         `curl -s ${proxy} --max-time 50 -X POST `+
         `'https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate' `+
@@ -135,20 +154,23 @@ async function gemini(prompt) {
         {maxBuffer:5*1024*1024,timeout:55000}
       ).toString()
       try{fs.unlinkSync(pf)}catch{}
+
       if(raw.includes('302 Moved')||raw.includes('sorry')||raw.length<100){
         p(`  🔄 IP blocked — rotating`,C.yellow)
-        if(torReady){rotateIp();await sleep(4000)}
+        if(torReady){rotateIp();await sleep(5000)}
+        else await sleep(2000)
         continue
       }
       const r=parseGemini(raw)
       if(r) return r
+      p(`  ⚠️  empty parse retry ${i+1}`,C.gray)
+      await sleep(2000)
     } catch(e) {
-      p(`  ⚠️  retry ${i+1}: ${e.message.slice(0,50)}`,C.gray)
-      if(torReady&&i===1){rotateIp();await sleep(3000)}
+      p(`  ⚠️  retry ${i+1}: ${e.message.slice(0,60)}`,C.gray)
+      if(i===1&&torReady){rotateIp();await sleep(4000)}
       else await sleep(2000)
     }
   }
-  try{fs.unlinkSync(pf)}catch{}
   return null
 }
 
@@ -354,11 +376,24 @@ async function agent(target) {
     if(!raw){
       failCount++
       p(`  ⚠️  No response (${failCount})`,C.yellow)
-      if(failCount>=5){ history=[]; lastOut=`Reset. Phase ${phase} continuing.`; failCount=0 }
+      if(failCount===3) {
+        // try switching to direct connection
+        p(`  🔀 Switching to direct connection...`,C.yellow)
+        torReady=false
+        await sleep(2000)
+      }
+      if(failCount===4) {
+        // try re-enabling tor
+        p(`  🧅 Re-enabling Tor...`,C.yellow)
+        torReady=true
+        rotateIp()
+        await sleep(5000)
+        failCount=0
+      }
+      if(failCount>=6){ history=[]; lastOut=`Reset. Phase ${phase} continuing.`; failCount=0 }
       await sleep(3000); continue
     }
     failCount=0
-
     const parsed=parseJSON(raw)
     if(!parsed){ p(`  ⚠️  Bad JSON: ${raw.slice(0,100)}`,C.yellow); lastOut=raw.slice(0,300); continue }
 
