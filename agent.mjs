@@ -436,11 +436,26 @@ async function agent(target, scope, authCtx, notes) {
   })
 
   while (!stopped) {
-    // pause loop — انتظر حتى start
-    while (paused && !stopped) {
-      await sleep(500)
+    // pause loop — تحدث مع المستخدم وانتظر start
+    if (paused) {
+      await sleep(300)
+      // إذا وصلت رسالة وهو paused — رد عليها
+      if (userMessage) {
+        const um = userMessage; userMessage = null
+        p(`\n  🤖 ${C.cyan('Agent:')} thinking...`, C.cyan)
+        const reply = await gemini(
+          'You are a penetration testing AI. The pentest is paused.\n' +
+          'Target: ' + target + '\n' +
+          'Confirmed vulns: ' + (confirmedVulns.map(v=>v.name).join(', ')||'none') + '\n' +
+          'Findings so far: ' + (findings.slice(-5).join(', ')||'none') + '\n\n' +
+          'User says: ' + um + '\n\n' +
+          'Reply concisely in the same language the user used. If they give new instructions, confirm and tell them to type \'start\' to resume.'
+        )
+        p(`\n  💬 ${reply || 'Got it. Type \'start\' to resume.'}\n`, C.cyan)
+        if (um.toLowerCase() !== 'stop') extraCtx = 'USER INSTRUCTION (during pause): ' + um
+      }
+      continue
     }
-    if (stopped) break
     step++
     p('\n' + '─'.repeat(48), C.gray)
     const modeTag = mode === 'exploit' ? C.bg_red(' ⚔️  EXPLOIT ') : C.cyan('🔍 HUNT')
@@ -449,23 +464,8 @@ async function agent(target, scope, authCtx, notes) {
     let userCtx = ''
     if (extraCtx) { userCtx = extraCtx; extraCtx = '' }
     if (userMessage) {
-      const um = userMessage; userMessage = null
-      if (paused) {
-        // رد على المستخدم وهو في pause
-        p(`\n  🤖 ${C.cyan('Agent (paused):')} Processing your message...`, C.cyan)
-        const reply = await gemini(
-          'You are a penetration testing AI assistant. The pentest is currently paused.\n' +
-          `Target: ${target}\n` +
-          `Confirmed vulns: ${confirmedVulns.map(v=>v.name).join(', ')||'none'}\n` +
-          `Findings: ${findings.slice(-5).join(', ')||'none'}\n\n` +
-          `User asks: ${um}\n\n` +
-          'Answer concisely. If user wants to change direction, acknowledge and they can type \'start\' to resume with new instructions.'
-        )
-        p(`  💬 ${reply || 'OK, noted. Type \'start\' to resume.'}`, C.cyan)
-        extraCtx = `USER INSTRUCTION (given during pause): ${um}`
-      } else {
-        userCtx += '\nUSER: ' + um
-      }
+      userCtx += '\nUSER: ' + userMessage
+      userMessage = null
     }
     if (notes) userCtx += '\nNOTES: ' + notes
 
