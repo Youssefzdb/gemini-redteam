@@ -443,15 +443,32 @@ async function agent(target, scope, authCtx, notes) {
       if (userMessage) {
         const um = userMessage; userMessage = null
         p(`\n  🤖 ${C.cyan('Agent:')} thinking...`, C.cyan)
-        const reply = await gemini(
-          'You are a penetration testing AI. The pentest is paused.\n' +
-          'Target: ' + target + '\n' +
-          'Confirmed vulns: ' + (confirmedVulns.map(v=>v.name).join(', ')||'none') + '\n' +
-          'Findings so far: ' + (findings.slice(-5).join(', ')||'none') + '\n\n' +
-          'User says: ' + um + '\n\n' +
-          'Reply concisely in the same language the user used. If they give new instructions, confirm and tell them to type \'start\' to resume.'
-        )
-        p(`\n  💬 ${reply || 'Got it. Type \'start\' to resume.'}\n`, C.cyan)
+        // استخدم direct بدون Tor للسرعة
+        const wasTor = torReady
+        torReady = false
+        const pausePrompt = [
+          'SYSTEM: You are an AI assistant for a security researcher.',
+          'The automated pentest is currently PAUSED.',
+          'Target being tested: ' + target,
+          'Confirmed vulns: ' + (confirmedVulns.map(v=>v.name).join(', ')||'none yet'),
+          '',
+          'USER MESSAGE: ' + um,
+          '',
+          'INSTRUCTIONS:',
+          '- Reply ONLY with your own answer, do NOT repeat the user message',
+          '- Reply in the same language as the user message',
+          '- Be concise (2-4 sentences max)',
+          '- If user gives new direction, confirm it briefly',
+          '- End with: Type \'start\' to resume the pentest',
+          '',
+          'YOUR REPLY:'
+        ].join('\n')
+        const reply = await gemini(pausePrompt)
+        torReady = wasTor
+        // تأكد أن الرد ليس echo
+        const cleanReply = (reply || '').trim()
+        const isEcho = cleanReply.toLowerCase().includes(um.toLowerCase().slice(0,20))
+        p(`\n  💬 ${isEcho || !cleanReply ? 'Understood. Type \'start\' to resume with new instructions.' : cleanReply}\n`, C.cyan)
         if (um.toLowerCase() !== 'stop') extraCtx = 'USER INSTRUCTION (during pause): ' + um
       }
       continue
