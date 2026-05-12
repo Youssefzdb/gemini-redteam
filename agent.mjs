@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 /**
- * 🔴 Gemini RedTeam — Expert Cybersecurity Agent
+ * 🔴 Gemini RedTeam — Free Expert Agent
+ * - لا phases، لا max steps
+ * - يشتغل بحرية كـ expert حقيقي
+ * - يتوقف فقط عند تأكيد ثغرة → يسأل المستخدم
+ * - إذا اختار exploit → يبقى في exploit mode حتى يستغلها كاملاً
  */
 import querystring from 'node:querystring'
 import { execSync } from 'node:child_process'
@@ -19,13 +23,13 @@ const C = {
   bold:   s=>`\x1b[1m${s}\x1b[0m`,
   gray:   s=>`\x1b[90m${s}\x1b[0m`,
   magenta:s=>`\x1b[35m${s}\x1b[0m`,
-  blue:   s=>`\x1b[34m${s}\x1b[0m`,
   bg_red: s=>`\x1b[41m\x1b[97m${s}\x1b[0m`,
+  bg_grn: s=>`\x1b[42m\x1b[97m${s}\x1b[0m`,
 }
 const w = msg => fs.appendFileSync(LOG, msg+'\n')
 const p = (msg,c) => { console.log(c?c(msg):msg); w(msg) }
 
-// ── Non-blocking user input ────────────────────────────────────────────────
+// ── User input ─────────────────────────────────────────────────────────────
 let userMessage  = null
 let stopped      = false
 let waitingInput = false
@@ -35,21 +39,22 @@ const rl = readline.createInterface({input:process.stdin})
 rl.on('line', line => {
   const l = line.trim()
   if(!l) return
-  const low = l.toLowerCase()
-  if(low==='stop'||low==='exit'){ stopped=true; p('\n  🛑 Stopping...',C.red); return }
-  if(low==='findings') return
+  if(l.toLowerCase()==='stop'||l.toLowerCase()==='exit'){
+    stopped=true; p('\n  🛑 Stopping...',C.red); return
+  }
+  if(l.toLowerCase()==='findings') return
   if(waitingInput && inputResolve){
     inputResolve(l); waitingInput=false; inputResolve=null; return
   }
-  userMessage = l
+  userMessage=l
   p(`\n  📨 ${C.bold('USER →')} "${l}"`,C.magenta)
 })
 
 function waitUser(question) {
   return new Promise(resolve => {
-    p(`\n${'▶'.repeat(52)}`,C.yellow)
+    p(`\n${'▶'.repeat(54)}`,C.yellow)
     p(`  ❓ ${C.bold(question)}`,C.yellow)
-    p(`${'▶'.repeat(52)}`,C.yellow)
+    p(`${'▶'.repeat(54)}`,C.yellow)
     process.stdout.write(C.cyan('  > '))
     waitingInput=true; inputResolve=resolve
   })
@@ -65,8 +70,10 @@ function setupTor() {
     try { execSync('which tor',{stdio:'ignore'}) }
     catch { execSync('apt-get install -y -qq tor netcat-openbsd 2>/dev/null',{stdio:'ignore'}) }
     try {
-      const rc='/etc/tor/torrc'; let c=''; try{c=fs.readFileSync(rc,'utf8')}catch{}
-      if(!c.includes('ControlPort 9051')) fs.appendFileSync(rc,'\nControlPort 9051\nCookieAuthentication 0\n')
+      const rc='/etc/tor/torrc'; let c=''
+      try{c=fs.readFileSync(rc,'utf8')}catch{}
+      if(!c.includes('ControlPort 9051'))
+        fs.appendFileSync(rc,'\nControlPort 9051\nCookieAuthentication 0\n')
       execSync('service tor restart 2>/dev/null||systemctl restart tor 2>/dev/null',{stdio:'ignore'})
       execSync('sleep 5',{stdio:'ignore'})
     } catch {}
@@ -80,24 +87,24 @@ function rotateIp() {
   try {
     let prevIp=''
     try{prevIp=execSync('curl -s --socks5 127.0.0.1:9050 --max-time 5 https://api.ipify.org 2>/dev/null').toString().trim()}catch{}
-    try{execSync(`printf 'AUTHENTICATE ""
-SIGNAL NEWNYM
-QUIT
-' | nc -q1 127.0.0.1 9051 2>/dev/null||true`)}catch{}
+    try{execSync(`printf 'AUTHENTICATE ""\r\nSIGNAL NEWNYM\r\nQUIT\r\n' | nc -q1 127.0.0.1 9051 2>/dev/null||true`)}catch{}
     let newIp=prevIp
     for(let i=0;i<5;i++){
       execSync('sleep 3')
       try{newIp=execSync('curl -s --socks5 127.0.0.1:9050 --max-time 5 https://api.ipify.org 2>/dev/null').toString().trim()}catch{}
       if(newIp&&newIp!==prevIp) break
     }
-    if(newIp===prevIp||!newIp){
+    if(!newIp||newIp===prevIp){
       p(`  🔁 IP stuck — restarting tor...`,C.yellow)
-      try{execSync('service tor restart 2>/dev/null||systemctl restart tor 2>/dev/null',{stdio:'ignore'});execSync('sleep 8')}catch{}
-      try{newIp=execSync('curl -s --socks5 127.0.0.1:9050 --max-time 8 https://api.ipify.org 2>/dev/null').toString().trim()}catch{}
+      try{
+        execSync('service tor restart 2>/dev/null||systemctl restart tor 2>/dev/null',{stdio:'ignore'})
+        execSync('sleep 8')
+        newIp=execSync('curl -s --socks5 127.0.0.1:9050 --max-time 8 https://api.ipify.org 2>/dev/null').toString().trim()
+      }catch{}
     }
     lastRotate=Date.now()
     p(`  🔄 ${prevIp||'?'} → ${newIp||'?'}`,C.cyan)
-  } catch(e){p(`  ⚠️  rotate: ${e.message.slice(0,40)}`,C.gray)}
+  } catch(e){ p(`  ⚠️  rotate: ${e.message.slice(0,40)}`,C.gray) }
 }
 
 // ── Gemini ─────────────────────────────────────────────────────────────────
@@ -115,9 +122,7 @@ function parseGemini(text) {
           const chunks=inner?.[4]
           if(!Array.isArray(chunks)) continue
           for(const chunk of chunks) {
-            const parts=chunk?.[1]
-            if(!Array.isArray(parts)) continue
-            const txt=parts.filter(t=>typeof t==='string').join('')
+            const txt=(chunk?.[1]||[]).filter(t=>typeof t==='string').join('')
             if(txt.length>best.length) best=txt
           }
         } catch {}
@@ -129,19 +134,15 @@ function parseGemini(text) {
 
 async function gemini(prompt) {
   if(Date.now()-lastRotate>ROTATE_MS&&torReady) rotateIp()
-  const safe=prompt.slice(0,4500)
-  const inner=[[safe,0,null,null,null,null,0],['en-US'],
+  const inner=[[prompt.slice(0,4500),0,null,null,null,null,0],['en-US'],
     ['','','',null,null,null,null,null,null,''],'','',null,[0],1,null,null,1,0,
     null,null,null,null,null,[[0]],0]
-  // encode payload as base64 to pass inline — avoids --data-binary file issues
   const payload=querystring.stringify({'f.req':JSON.stringify([null,JSON.stringify(inner)])})+'&'
-  const payloadB64=Buffer.from(payload).toString('base64')
 
-  for(let i=0;i<4;i++) {
+  for(let i=0;i<4;i++){
     const proxy=torReady?'--socks5 127.0.0.1:9050':''
+    const pf=`/tmp/gpl_${Date.now()}_${i}.bin`
     try {
-      // write fresh file each attempt to avoid stale/deleted file
-      const pf=`/tmp/gpl_${Date.now()}_${i}.bin`
       fs.writeFileSync(pf,payload,'utf8')
       const raw=execSync(
         `curl -s ${proxy} --max-time 50 -X POST `+
@@ -149,12 +150,10 @@ async function gemini(prompt) {
         `-H 'content-type: application/x-www-form-urlencoded;charset=UTF-8' `+
         `-H 'x-same-domain: 1' `+
         `-H 'user-agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36' `+
-        `-H 'accept: */*' `+
-        `--data-binary @${pf}`,
+        `-H 'accept: */*' --data-binary @${pf}`,
         {maxBuffer:5*1024*1024,timeout:55000}
       ).toString()
       try{fs.unlinkSync(pf)}catch{}
-
       if(raw.includes('302 Moved')||raw.includes('sorry')||raw.length<100){
         p(`  🔄 IP blocked — rotating`,C.yellow)
         if(torReady){rotateIp();await sleep(5000)}
@@ -163,9 +162,9 @@ async function gemini(prompt) {
       }
       const r=parseGemini(raw)
       if(r) return r
-      p(`  ⚠️  empty parse retry ${i+1}`,C.gray)
       await sleep(2000)
     } catch(e) {
+      try{fs.unlinkSync(pf)}catch{}
       p(`  ⚠️  retry ${i+1}: ${e.message.slice(0,60)}`,C.gray)
       if(i===1&&torReady){rotateIp();await sleep(4000)}
       else await sleep(2000)
@@ -176,7 +175,7 @@ async function gemini(prompt) {
 
 function parseJSON(text) {
   if(!text) return null
-  for(const pat of [/```json\s*([\s\S]*?)```/,/```\s*(\{[\s\S]*?\})\s*```/,/(\{[\s\S]*\})/]) {
+  for(const pat of [/```json\s*([\s\S]*?)```/,/(\{[\s\S]*\})/]) {
     const m=text.match(pat)
     if(m){try{return JSON.parse(m[1])}catch{}}
   }
@@ -185,8 +184,10 @@ function parseJSON(text) {
 }
 
 function clean(cmd) {
-  if(!cmd) return ''
-  return cmd.replace(/\[([^\]]*)\]\(([^)]+)\)/g,'$2').replace(/\[([^\]]+)\]/g,'$1').replace(/`/g,'').trim()
+  return (cmd||'')
+    .replace(/\[([^\]]*)\]\(([^)]+)\)/g,'$2')
+    .replace(/\[([^\]]+)\]/g,'$1')
+    .replace(/`/g,'').trim()
 }
 
 function runCmd(rawCmd) {
@@ -194,265 +195,276 @@ function runCmd(rawCmd) {
   p(`\n  ⚡ ${C.bold('EXEC:')} ${C.green(cmd)}`)
   try {
     const o=execSync(cmd,{
-      timeout:90000,maxBuffer:10*1024*1024,shell:'/bin/bash',
-      env:{...process.env,TERM:'xterm',DEBIAN_FRONTEND:'noninteractive',
+      timeout:120000, maxBuffer:10*1024*1024, shell:'/bin/bash',
+      env:{...process.env, TERM:'xterm', DEBIAN_FRONTEND:'noninteractive',
            PATH:process.env.PATH+':/root/go/bin:/usr/local/go/bin:/root/.local/bin'}
     }).toString().trim()
-    return {ok:true,output:o||'(no output)',cmd}
+    return {ok:true, output:o||'(no output)', cmd}
   } catch(e) {
     const o=(e.stdout?.toString()||'')+(e.stderr?.toString()||'')
-    return {ok:false,output:o.trim()||e.message,cmd}
+    return {ok:false, output:o.trim()||e.message, cmd}
   }
 }
 
 // ── System prompt ──────────────────────────────────────────────────────────
-function buildPrompt(phase, target, step, lastOut, lastOk, ctx, findings, confirmedVulns, userCtx) {
-  const phaseDesc = {
-    1:`RECON — Map the target completely:
-  HTTP headers, server/tech detection, WAF/CDN, DNS records, WHOIS,
-  SSL cert SANs, subdomains, robots.txt, sitemap, security.txt, Google dorks`,
-    2:`SCAN — Deep enumeration:
-  All ports (not just top 1000), service versions, directory/file bruteforce,
-  JS file analysis for secrets/endpoints, API mapping, backup files (.env .git .bak),
-  error pages for stack traces`,
-    3:`VULN HUNT — Systematic attack:
-  SQLi, XSS (reflected/stored/DOM), IDOR, SSRF, LFI, open redirect,
-  CORS misconfig, auth bypass, JWT flaws, exposed admin panels,
-  sensitive data leaks, rate limit bypass, mass assignment`,
-    4:`CONFIRM — Prove each finding:
-  Run precise PoC per vulnerability, capture exact evidence,
-  eliminate false positives, rate CRITICAL/HIGH/MEDIUM/LOW`,
-    5:`REPORT — Write professional markdown report to ${RFILE}:
-  Executive summary, findings table, detailed evidence, remediation`
-  }
+function buildPrompt(target, step, mode, lastOut, lastOk, ctx, findings, confirmedVulns, userCtx) {
+  const modeCtx = mode==='exploit'
+    ? `⚔️  EXPLOIT MODE ACTIVE — You are in full exploitation mode.
+Your ONLY goal right now is to completely exploit the confirmed vulnerability.
+Do NOT move on until exploitation is 100% complete (data dumped, shell obtained, auth bypassed, or max impact achieved).
+Use every technique available: sqlmap --dump, reverse shells, privilege escalation, data exfiltration.
+Only set exploitation_complete=true when you have achieved maximum impact and have proof.`
+    : `🔍 HUNTING MODE — You are hunting for vulnerabilities with full freedom.
+Perform comprehensive recon, scanning, and vulnerability testing.
+Think and act like a senior red team operator — be creative, methodical, thorough.
+Test everything: SQLi, XSS, IDOR, SSRF, LFI, auth bypass, CORS, JWT, exposed secrets, misconfigs.
+When you confirm a real vulnerability set confirmed_vuln=true.`
 
-  return `You are a senior red team operator and penetration tester with deep offensive security expertise.
-You think critically, adapt your approach based on what you discover, and pursue vulnerabilities like a real attacker.
+  return `You are an elite red team operator and penetration tester.
+You work with complete autonomy — no predefined phases, no artificial limits.
+You decide what to do next based on what you discover, like a real expert.
 
 TARGET: ${target}
-PHASE: ${phase}/5 — ${['','RECON','SCAN','VULN HUNT','CONFIRM','REPORT'][phase]}
-STEP: ${step}${userCtx}
+STEP: ${step}
+MODE: ${mode.toUpperCase()}
+${userCtx}
 
-PHASE OBJECTIVE:
-${phaseDesc[phase]}
+${modeCtx}
 
-STRICT RULES:
-1. NEVER run "apt-get update" or "apt-get update && ..." — absolutely forbidden.
-2. BEFORE installing ANY tool: always check if it exists first with "which <tool>" or "<tool> --version"
-3. ONLY install if the tool is confirmed missing. Most tools already exist on Kali — check first.
-4. To install a missing tool: apt-get install -y -qq <tool>  OR  pip3 install -q <tool>  OR  go install <pkg>@latest
-5. NEVER reinstall a tool that already works.
-4. Never stop to ask the user — work autonomously
-5. Commands must be plain bash — no markdown, plain URLs only
-6. If command fails: think why and try a smarter approach
-7. Think like an expert — understand results, don't just run scripts blindly
-8. When you CONFIRM a real vulnerability set confirmed_vuln=true
+TOOL RULES:
+1. NEVER run apt-get update
+2. Check tool exists first: which <tool> || <tool> --version
+3. Only install if missing: apt-get install -y -qq <tool> OR pip3 install -q OR go install
 
-JSON RESPONSE FORMAT (nothing else):
+JSON RESPONSE ONLY — no other text:
 {
-  "thought": "expert reasoning — what did I learn, what should I do next",
-  "action": "run_command | print | next_phase | done",
-  "command": "exact bash command — plain text only",
-  "message": "progress update for print action",
-  "findings": ["description [SEVERITY]"],
+  "thought": "expert reasoning — what did I find, what's my next move and why",
+  "action": "run_command | print | done",
+  "command": "bash command — plain text, no markdown, plain URLs",
+  "message": "text for print action",
+  "findings": ["finding [SEVERITY]"],
   "analysis": "technical analysis of last output",
   "confirmed_vuln": false,
+  "exploitation_complete": false,
   "vuln_details": {
-    "name": "vuln name",
+    "name": "vulnerability name",
     "severity": "CRITICAL|HIGH|MEDIUM|LOW",
-    "evidence": "exact proof snippet",
-    "impact": "what attacker can achieve",
+    "evidence": "exact proof from response",
+    "impact": "what can be achieved",
     "reproduce": "exact reproduction steps"
   }
 }
 
-LAST OUTPUT [${lastOk?'SUCCESS':'FAILED'}]:
+LAST OUTPUT [${lastOk?'OK':'FAILED'}]:
 ${lastOut.slice(0,500)}
 
 RECENT HISTORY:
 ${ctx||'none'}
 
 CONFIRMED VULNS:
-${confirmedVulns.length?confirmedVulns.map(v=>`[${v.severity}] ${v.name}: ${v.evidence?.slice(0,80)}`).join('\n'):'none'}
+${confirmedVulns.length
+  ? confirmedVulns.map(v=>`  [${v.severity}] ${v.name} — ${v.impact||''}`).join('\n')
+  : 'none yet'}
 
-FINDINGS:
-${findings.length?findings.slice(-8).join('\n'):'none'}
+FINDINGS SO FAR:
+${findings.length ? findings.slice(-10).join('\n') : 'none yet'}
 
 JSON:`
 }
 
-// ── Vuln decision ──────────────────────────────────────────────────────────
+// ── Confirmed vuln handler ─────────────────────────────────────────────────
 async function handleConfirmedVuln(vuln) {
   p(`\n${'█'.repeat(62)}`,C.bg_red)
   p(`  💥 CONFIRMED VULNERABILITY`,C.bg_red)
   p(`${'█'.repeat(62)}`,C.bg_red)
-  p(`\n  Name    : ${C.bold(vuln.name||'?')}`,C.red)
-  p(`  Severity: ${C.bold(vuln.severity||'?')}`,vuln.severity==='CRITICAL'?C.red:C.yellow)
+  p(`\n  Name    : ${C.bold(vuln.name||'?')}`)
+  p(`  Severity: ${C.bold(vuln.severity||'?')}`, vuln.severity==='CRITICAL'?C.red:C.yellow)
   p(`  Evidence: ${vuln.evidence||'see log'}`,C.cyan)
   p(`  Impact  : ${vuln.impact||'?'}`)
   p(`  Repro   : ${vuln.reproduce||'see log'}\n`)
 
   const choice = await waitUser(
     'What do you want to do?\n' +
-    '  [1] exploit  — full exploitation attempt\n' +
+    '  [1] exploit  — full exploitation (agent stays in exploit mode until done)\n' +
     '  [2] bypass   — use as foothold, pivot deeper\n' +
     '  [3] document — record and continue hunting\n' +
-    '  [4] skip     — ignore and move on\n' +
-    '  or type any custom instruction'
+    '  [4] skip     — ignore\n' +
+    '  or type custom instruction'
   )
 
   const low=choice.toLowerCase().trim()
-  let decision=''
   if(low==='1'||low==='exploit'){
-    decision='EXPLOIT: Attempt full exploitation. Use sqlmap/metasploit/custom payloads. Get max impact: RCE, data dump, privilege escalation.'
-    p(`  ⚔️  EXPLOIT mode`,C.red)
+    p(`\n  ⚔️  ${C.bg_red(' EXPLOIT MODE — will not exit until fully exploited ')}`,C.red)
+    return {mode:'exploit', instruction:'EXPLOIT FULLY: Use all techniques. Do not stop until maximum impact is achieved and proven.'}
   } else if(low==='2'||low==='bypass'){
-    decision='BYPASS: Use this vuln as foothold. Bypass auth controls, pivot to internal functionality, escalate access.'
-    p(`  🔓  BYPASS & PIVOT mode`,C.yellow)
+    p(`  🔓  BYPASS mode`,C.yellow)
+    return {mode:'hunt', instruction:`BYPASS: Use ${vuln.name} as foothold. Pivot and escalate access.`}
   } else if(low==='3'||low==='document'){
-    decision='DOCUMENT: Record this finding with full evidence, then continue discovering more vulnerabilities.'
     p(`  📝  DOCUMENT mode`,C.cyan)
+    return {mode:'hunt', instruction:`DOCUMENT ${vuln.name} with full evidence then continue hunting.`}
   } else if(low==='4'||low==='skip'){
-    decision='SKIP: Ignore this finding and continue.'
-    p(`  ⏭️  SKIP`,C.gray)
+    p(`  ⏭️  Skipping`,C.gray)
+    return {mode:'hunt', instruction:'Skip this finding and continue hunting.'}
   } else {
-    decision=`CUSTOM INSTRUCTION: ${choice}`
     p(`  📨  Custom: ${choice}`,C.magenta)
+    return {mode:'hunt', instruction:`USER: ${choice}`}
   }
-  return decision
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
 async function agent(target) {
   p(`\n${'═'.repeat(62)}`,C.red)
-  p(`  🔴 GEMINI REDTEAM — EXPERT AUTONOMOUS PENTESTER`,C.red)
-  p(`  Target: ${target}`,C.yellow)
-  p(`  Log:    ${LOG}`,C.gray)
-  p(`  Report: ${RFILE}`,C.gray)
-  p(`  Type anytime: message | 'findings' | 'stop'`,C.gray)
+  p(`  🔴 GEMINI REDTEAM — EXPERT FREE AGENT`,C.red)
+  p(`  Target  : ${target}`,C.yellow)
+  p(`  Log     : ${LOG}`,C.gray)
+  p(`  Report  : ${RFILE}`,C.gray)
+  p(`  Controls: type anything | 'findings' | 'stop'`,C.gray)
   p(`${'═'.repeat(62)}\n`,C.red)
 
   p('  🧅 Starting Tor...',C.cyan)
   setupTor()
 
-  const phaseNames={1:'🔍 RECON',2:'📡 SCAN',3:'🎯 VULN HUNT',4:'💥 CONFIRM',5:'📝 REPORT'}
-  const showPhase = ph => {
-    p(`\n${'▓'.repeat(62)}`,C.blue)
-    p(`  ${phaseNames[ph]} — Phase ${ph}/5`,C.bold)
-    p(`${'▓'.repeat(62)}\n`,C.blue)
-  }
-
-  let phase=1, history=[], findings=[], confirmedVulns=[]
-  let lastOut=`Starting pentest on ${target}`, lastOk=true
-  let failCount=0, step=0, vulnDecision=''
+  let mode          = 'hunt'   // 'hunt' | 'exploit'
+  let history       = []
+  let findings      = []
+  let confirmedVulns= []
+  let lastOut       = `Starting pentest on ${target}`
+  let lastOk        = true
+  let failCount     = 0
+  let step          = 0
+  let extraCtx      = ''
 
   rl.on('line', line => {
-    if(line.trim().toLowerCase()==='findings') {
+    if(line.trim().toLowerCase()==='findings'){
       p(`\n  💥 CONFIRMED (${confirmedVulns.length}):`,C.red)
-      confirmedVulns.forEach((v,i)=>p(`  ${i+1}. [${v.severity}] ${v.name}`,C.yellow))
-      p(`\n  🔎 FINDINGS (${findings.length}):`,C.yellow)
+      confirmedVulns.forEach((v,i)=>p(`  ${i+1}. [${v.severity}] ${v.name} — ${v.impact||''}`,C.yellow))
+      p(`\n  🔎 ALL FINDINGS (${findings.length}):`,C.yellow)
       findings.forEach((f,i)=>p(`  ${i+1}. ${f}`,C.gray))
     }
   })
 
-  showPhase(phase)
-
-  while(!stopped && phase<=5) {
+  while(!stopped) {
     step++
     p(`\n${'─'.repeat(48)}`,C.gray)
-    p(`  📍 Step ${step} | ${phaseNames[phase]} ${torReady?'🧅':''}`,C.cyan)
+    const modeTag = mode==='exploit'
+      ? C.bg_red(` ⚔️  EXPLOIT MODE `)
+      : C.cyan(`🔍 HUNT`)
+    p(`  📍 Step ${step} | ${modeTag} ${torReady?'🧅':''}`,)
 
     let userCtx=''
-    if(vulnDecision){ userCtx=`\nVULN DECISION: ${vulnDecision}`; vulnDecision='' }
+    if(extraCtx){ userCtx=extraCtx; extraCtx='' }
     if(userMessage){ userCtx+=`\nUSER: ${userMessage}`; userMessage=null }
 
-    const ctx=history.slice(-4).map(h=>
+    const ctx=history.slice(-5).map(h=>
       `[${h.ok?'OK':'FAIL'}] ${(h.cmd||'').slice(0,70)}: ${(h.output||'').slice(0,150)}`
     ).join('\n')
 
     p(`  🤔 Thinking...`,C.gray)
-    const raw=await gemini(buildPrompt(phase,target,step,lastOut,lastOk,ctx,findings,confirmedVulns,userCtx))
+    const raw=await gemini(buildPrompt(target,step,mode,lastOut,lastOk,ctx,findings,confirmedVulns,userCtx))
 
     if(!raw){
       failCount++
       p(`  ⚠️  No response (${failCount})`,C.yellow)
-      if(failCount===3) {
-        // try switching to direct connection
-        p(`  🔀 Switching to direct connection...`,C.yellow)
-        torReady=false
-        await sleep(2000)
-      }
-      if(failCount===4) {
-        // try re-enabling tor
-        p(`  🧅 Re-enabling Tor...`,C.yellow)
-        torReady=true
-        rotateIp()
-        await sleep(5000)
-        failCount=0
-      }
-      if(failCount>=6){ history=[]; lastOut=`Reset. Phase ${phase} continuing.`; failCount=0 }
+      if(failCount===3){ p(`  🔀 Switching to direct...`,C.yellow); torReady=false }
+      if(failCount===5){ p(`  🧅 Re-enabling Tor...`,C.yellow); torReady=true; rotateIp(); await sleep(5000); failCount=0 }
       await sleep(3000); continue
     }
     failCount=0
+
     const parsed=parseJSON(raw)
     if(!parsed){ p(`  ⚠️  Bad JSON: ${raw.slice(0,100)}`,C.yellow); lastOut=raw.slice(0,300); continue }
 
     if(parsed.thought) p(`\n  💭 ${parsed.thought}`,C.gray)
     if(parsed.analysis?.length>5) p(`  🔍 ${parsed.analysis}`)
 
+    // collect findings
     if(parsed.findings?.length)
       for(const f of parsed.findings)
         if(!findings.includes(f)){ findings.push(f); p(`\n  🔎 ${C.yellow(f)}`) }
 
-    if(parsed.action==='run_command') {
+    // handle action
+    if(parsed.action==='run_command'){
       if(!parsed.command){ p('  ⚠️  no command',C.yellow); continue }
       const res=runCmd(parsed.command)
       lastOut=res.output; lastOk=res.ok
+      const preview=res.output.slice(0,900)
       p(`\n  📤 OUTPUT:`)
-      p(res.output.slice(0,800).split('\n').map(l=>`     ${l}`).join('\n'),res.ok?C.cyan:C.red)
-      if(res.output.length>800) p(`     ...+${res.output.length-800} chars`,C.gray)
-      history.push({step,cmd:res.cmd,output:res.output.slice(0,300),ok:res.ok})
+      p(preview.split('\n').map(l=>`     ${l}`).join('\n'), res.ok?C.cyan:C.red)
+      if(res.output.length>900) p(`     ...+${res.output.length-900} chars`,C.gray)
+      history.push({step, cmd:res.cmd, output:res.output.slice(0,300), ok:res.ok})
 
-    } else if(parsed.action==='print') {
+    } else if(parsed.action==='print'){
       p(`\n${'━'.repeat(52)}`,C.yellow)
-      p(`  📊 ${phaseNames[phase]} — Step ${step}`,C.bold)
+      p(`  📊 Agent Update — Step ${step}`,C.bold)
       p(parsed.message||'')
       p(`${'━'.repeat(52)}`,C.yellow)
-      lastOut=`Report at step ${step}`; lastOk=true
+      lastOut=`Update at step ${step}`; lastOk=true
 
-    } else if(parsed.action==='next_phase') {
-      p(`\n  ✅ ${phaseNames[phase]} complete!`,C.green)
-      if(parsed.message) p(parsed.message,C.green)
-      phase++
-      if(phase<=5) showPhase(phase)
-      lastOut=`Phase ${phase-1} done. Starting ${phaseNames[phase]||'report'}.`
-
-    } else if(parsed.action==='done') {
-      p(`\n  ✅ Done`,C.green)
+    } else if(parsed.action==='done'){
+      // write report
+      const report=buildReport(target,confirmedVulns,findings,history)
+      fs.writeFileSync(RFILE,report)
+      p(`\n  ✅ Pentest complete`,C.bg_grn)
       if(parsed.message) p(parsed.message)
-      phase=6
+      stopped=true
     }
 
-    // ── CONFIRMED VULN → pause & ask ──────────────────────────────────────
-    if(parsed.confirmed_vuln && parsed.vuln_details?.name) {
+    // ── Exploitation complete → back to hunt ───────────────────────────────
+    if(mode==='exploit' && parsed.exploitation_complete){
+      p(`\n${'█'.repeat(62)}`,C.bg_grn)
+      p(`  ✅ EXPLOITATION COMPLETE — returning to hunting mode`,C.bg_grn)
+      p(`${'█'.repeat(62)}`,C.bg_grn)
+      mode='hunt'
+      extraCtx='Exploitation complete. Resume hunting for more vulnerabilities.'
+      lastOut=`Exploitation done. Continuing pentest.`; lastOk=true
+    }
+
+    // ── Confirmed vuln → pause and ask user ───────────────────────────────
+    if(parsed.confirmed_vuln && parsed.vuln_details?.name){
       const vd=parsed.vuln_details
-      if(!confirmedVulns.find(v=>v.name===vd.name)) {
+      if(!confirmedVulns.find(v=>v.name===vd.name&&v.evidence===vd.evidence)){
         confirmedVulns.push(vd)
         const dec=await handleConfirmedVuln(vd)
-        vulnDecision=`For "${vd.name}": ${dec}`
-        lastOut=`Confirmed: ${vd.name}. Decision: ${dec}`; lastOk=true
+        mode=dec.mode
+        extraCtx=dec.instruction
+        lastOut=`Confirmed: ${vd.name}. User chose: ${dec.instruction}`; lastOk=true
       }
     }
 
     await sleep(1200)
   }
 
+  // final summary
+  const report=buildReport(target,confirmedVulns,findings,history)
+  fs.writeFileSync(RFILE,report)
   p(`\n${'═'.repeat(62)}`,C.red)
-  p(`  📋 COMPLETE — ${step} steps | ${confirmedVulns.length} vulns | ${findings.length} findings`,C.bold)
-  confirmedVulns.forEach((v,i)=>p(`  ${i+1}. [${v.severity}] ${v.name}`,C.yellow))
-  if(fs.existsSync(RFILE)) p(`\n  📄 Report: ${RFILE}`,C.cyan)
-  p(`  📁 Log: ${LOG}\n`,C.gray)
+  p(`  📋 DONE — ${step} steps | ${confirmedVulns.length} exploited | ${findings.length} findings`,C.bold)
+  confirmedVulns.forEach((v,i)=>p(`  ${i+1}. [${v.severity}] ${v.name} — ${v.impact||''}`,C.yellow))
+  p(`\n  📄 Report: ${RFILE}`,C.cyan)
+  p(`  📁 Log   : ${LOG}\n`,C.gray)
   rl.close(); process.exit(0)
+}
+
+function buildReport(target, vulns, findings, history) {
+  const date=new Date().toISOString().split('T')[0]
+  return `# 🔴 Penetration Test Report
+**Target:** ${target}
+**Date:** ${date}
+
+## Confirmed Vulnerabilities
+| # | Name | Severity | Impact |
+|---|------|----------|--------|
+${vulns.map((v,i)=>`| ${i+1} | ${v.name} | ${v.severity} | ${v.impact||''} |`).join('\n')||'| - | None found | - | - |'}
+
+## All Findings
+${findings.map((f,i)=>`${i+1}. ${f}`).join('\n')||'None'}
+
+## Command History
+${history.map(h=>`- [${h.ok?'OK':'FAIL'}] \`${h.cmd}\``).join('\n')}
+
+---
+*Generated by Gemini RedTeam Agent — ${new Date().toISOString()}*
+`
 }
 
 const target=process.argv.slice(2).join(' ').trim()
