@@ -255,7 +255,7 @@ function runCmd(rawCmd) {
 }
 
 // ── System prompt ──────────────────────────────────────────────────────────
-function buildPrompt(target, step, mode, lastOut, lastOk, ctx, findings, confirmedVulns, userCtx, dbSummary) {
+function buildPrompt(target, step, mode, scope, authCtx, lastOut, lastOk, ctx, findings, confirmedVulns, userCtx, dbSummary) {
   const modeCtx = mode==='exploit'
     ? `⚔️  EXPLOIT MODE ACTIVE — You are in full exploitation mode.
 Your ONLY goal right now is to completely exploit the confirmed vulnerability.
@@ -273,9 +273,10 @@ You work with complete autonomy — no predefined phases, no artificial limits.
 You decide what to do next based on what you discover, like a real expert.
 
 TARGET: ${target}
+SCOPE: ${scope}
 STEP: ${step}
 MODE: ${mode.toUpperCase()}
-${userCtx}
+${authCtx}${userCtx}
 
 ${modeCtx}
 
@@ -366,7 +367,7 @@ async function handleConfirmedVuln(vuln) {
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
-async function agent(target) {
+async function agent(target, scope='Full penetration test', authCtx='', notes='') {
   p(`\n${'═'.repeat(62)}`,C.red)
   p(`  🔴 GEMINI REDTEAM — EXPERT FREE AGENT`,C.red)
   p(`  Target  : ${target}`,C.yellow)
@@ -421,7 +422,7 @@ async function agent(target) {
 
     p(`  🤔 Thinking...`,C.gray)
     const dbSum=db.summary()
-    const raw=await gemini(buildPrompt(target,step,mode,lastOut,lastOk,ctx,findings,confirmedVulns,userCtx,dbSum))
+    const raw=await gemini(buildPrompt(target,step,mode,scope,authCtx,lastOut,lastOk,ctx,findings,confirmedVulns,userCtx,dbSum))
 
     if(!raw){
       failCount++
@@ -530,8 +531,89 @@ ${history.map(h=>`- [${h.ok?'OK':'FAIL'}] \`${h.cmd}\``).join('\n')}
 `
 }
 
-const target=process.argv.slice(2).join(' ').trim()
-if(!target){
-  process.stdout.write(C.red('\n🔴 Target URL: '))
-  rl.once('line',t=>{ if(t.trim()) agent(t.trim()) })
-} else agent(target)
+async function menu() {
+  const ask = q => new Promise(res => {
+    process.stdout.write(q)
+    rl.once('line', l => res(l.trim()))
+  })
+
+  console.clear()
+  console.log(C.red(`
+╔══════════════════════════════════════════════════════════╗
+║          🔴  GEMINI REDTEAM — EXPERT AGENT               ║
+║          Autonomous Penetration Testing AI               ║
+╚══════════════════════════════════════════════════════════╝`))
+
+  // عرض sessions سابقة
+  const prev = fs.readdirSync('.').filter(f=>f.startsWith('db_')&&f.endsWith('.json'))
+  if(prev.length) {
+    p('\n  📂 Previous sessions:', C.cyan)
+    prev.forEach((f,i)=>{
+      try {
+        const d=JSON.parse(fs.readFileSync(f,'utf8'))
+        const cmds=Object.keys(d.commands||{}).length
+        const vulns=(d.confirmed||[]).length
+        p(`  [${i+1}] ${d.target} — ${cmds} cmds, ${vulns} vulns`,C.gray)
+      } catch{}
+    })
+    console.log()
+  }
+
+  // Target
+  let target = process.argv.slice(2).join(' ').trim()
+  if(!target) target = await ask(C.yellow('  🎯 Target URL (e.g. https://example.com): '))
+  if(!target) { p('  ❌ No target provided',C.red); process.exit(1) }
+  if(!target.startsWith('http')) target = 'https://' + target
+
+  // Scope
+  console.log(C.cyan('\n  📋 Scope options:'))
+  console.log(C.gray('  [1] Full pentest          — everything (default)'))
+  console.log(C.gray('  [2] Recon only             — passive, no active attacks'))
+  console.log(C.gray('  [3] Web vulns only         — SQLi, XSS, IDOR, SSRF...'))
+  console.log(C.gray('  [4] Specific endpoint      — focus on one path'))
+  console.log(C.gray('  [5] Custom                 — type your own focus'))
+  const scopeChoice = await ask(C.yellow('\n  Choose scope [1-5] or Enter for full: ')) || '1'
+
+  let scope = ''
+  if(scopeChoice==='1'||scopeChoice==='') scope = 'Full penetration test — recon, scanning, all vulnerability classes'
+  else if(scopeChoice==='2') scope = 'Passive recon only — no active attacks, just information gathering'
+  else if(scopeChoice==='3') scope = 'Web vulnerabilities focus — SQLi, XSS, IDOR, SSRF, LFI, auth bypass, CORS'
+  else if(scopeChoice==='4') {
+    const ep = await ask(C.yellow('  Specific endpoint (e.g. /api/login): '))
+    scope = `Focus exclusively on endpoint: ${ep} — test all vulnerability classes on this path`
+  }
+  else if(scopeChoice==='5') {
+    scope = await ask(C.yellow('  Describe your focus: '))
+  }
+  else scope = 'Full penetration test'
+
+  // Auth credentials (optional)
+  const hasAuth = await ask(C.yellow('\n  🔑 Do you have login credentials to test? [y/N]: '))
+  let authCtx = ''
+  if(hasAuth.toLowerCase()==='y') {
+    const user = await ask(C.yellow('  Username/email: '))
+    const pass = await ask(C.yellow('  Password: '))
+    authCtx = `\nAUTH CREDENTIALS AVAILABLE: username="${user}" password="${pass}" — use these to test authenticated endpoints and privilege escalation`
+  }
+
+  // Extra notes
+  const notes = await ask(C.yellow('\n  📝 Any extra notes or exclusions? (Enter to skip): '))
+
+  // Summary
+  console.log(C.green('\n  ╔═══════════════════════════════════════╗'))
+  console.log(C.green('  ║         MISSION BRIEFING              ║'))
+  console.log(C.green('  ╚═══════════════════════════════════════╝'))
+  p(`  Target : ${target}`, C.yellow)
+  p(`  Scope  : ${scope}`, C.cyan)
+  if(authCtx) p(`  Auth   : credentials provided`, C.cyan)
+  if(notes)   p(`  Notes  : ${notes}`, C.gray)
+  console.log()
+
+  const go = await ask(C.bold('  🚀 Start? [Y/n]: '))
+  if(go.toLowerCase()==='n') { p('  Aborted.',C.gray); process.exit(0) }
+
+  const fullTarget = target + (authCtx||'') + (notes ? `\nNOTES: ${notes}` : '') + `\nSCOPE: ${scope}`
+  agent(target, scope, authCtx, notes)
+}
+
+menu()
