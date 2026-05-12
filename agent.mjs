@@ -344,7 +344,7 @@ async function agent(target) {
 
   let phase=1, history=[], findings=[], confirmedVulns=[]
   let lastOut=`Starting pentest on ${target}`, lastOk=true
-  let failCount=0, step=0, phaseStep=0, vulnDecision=''
+  let failCount=0, step=0, vulnDecision=''
 
   rl.on('line', line => {
     if(line.trim().toLowerCase()==='findings') {
@@ -358,7 +358,7 @@ async function agent(target) {
   showPhase(phase)
 
   while(!stopped && phase<=5) {
-    step++; phaseStep++
+    step++
     p(`\n${'─'.repeat(48)}`,C.gray)
     p(`  📍 Step ${step} | ${phaseNames[phase]} ${torReady?'🧅':''}`,C.cyan)
 
@@ -423,7 +423,7 @@ async function agent(target) {
     } else if(parsed.action==='next_phase') {
       p(`\n  ✅ ${phaseNames[phase]} complete!`,C.green)
       if(parsed.message) p(parsed.message,C.green)
-      phase++; phaseStep=0
+      phase++
       if(phase<=5) showPhase(phase)
       lastOut=`Phase ${phase-1} done. Starting ${phaseNames[phase]||'report'}.`
 
@@ -443,8 +443,6 @@ async function agent(target) {
         lastOut=`Confirmed: ${vd.name}. Decision: ${dec}`; lastOk=true
       }
     }
-
-    if(phaseStep>=20&&phase<5){ p(`\n  ⏭️  Max steps — next phase`,C.yellow); phase++; phaseStep=0; if(phase<=5) showPhase(phase) }
 
     await sleep(1200)
   }
