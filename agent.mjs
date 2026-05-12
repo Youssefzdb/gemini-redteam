@@ -284,10 +284,13 @@ function runCmd(rawCmd) {
 // ── System prompt ──────────────────────────────────────────────────────────
 function buildPrompt(target, step, mode, scope, authCtx, lastOut, lastOk, ctx, findings, confirmedVulns, userCtx, dbSummary) {
   const modeCtx = mode==='exploit'
-    ? `🔬 VERIFICATION MODE — Perform deep technical verification of the confirmed vulnerability.
-Your goal is to fully demonstrate the impact with clear proof-of-concept evidence.
-Document exact reproduction steps, affected data scope, and technical details.
-Only set exploitation_complete=true when you have complete technical evidence documented.`
+    ? `🔬 DEEP EXPLOITATION MODE — Exploit the confirmed vulnerability to maximum impact.
+CRITICAL RULES:
+- If a command gave same result before: try COMPLETELY DIFFERENT technique
+- For ProxyShell/Exchange: use Python scripts not curl (write exploit.py if needed)
+- For complex CVE chains: write a full Python/bash script, not manual curl steps
+- If curl fails repeatedly: switch to Python requests, impacket, or known PoC tools
+- Set exploitation_complete=true ONLY when: shell obtained, data dumped, or RCE proven\`
     : `🔍 AUDIT MODE — Conduct a comprehensive security assessment.
 Perform systematic recon, enumeration, and vulnerability analysis.
 Test all common vulnerability classes: injection, authentication, access control, misconfigurations.
@@ -341,15 +344,15 @@ ${lastOut.slice(0,500)}
 RECENT HISTORY:
 ${ctx||'none'}
 
-CONFIRMED VULNS:
+CONFIRMED VULNS (already asked user — do NOT re-confirm):
 ${confirmedVulns.length
-  ? confirmedVulns.map(v=>`  [${v.severity}] ${v.name} — ${v.impact||''}`).join('\n')
+  ? confirmedVulns.map(v=>`  [${v.severity}] ${v.name} — ${v.impact||''} [SKIP — already confirmed]`).join('\n')
   : 'none yet'}
 
 FINDINGS SO FAR:
 ${findings.length ? findings.slice(-10).join('\n') : 'none yet'}
 
-ALREADY EXECUTED COMMANDS (${dbSummary.total} total — DO NOT repeat these):
+ALREADY EXECUTED COMMANDS (${dbSummary.total} total — SKIP these, try different approaches):
 ${dbSummary.allCmds.slice(0,800)||'none yet'}
 
 LAST 10 RESULTS:
@@ -516,7 +519,13 @@ async function agent(target, scope='Full penetration test', authCtx='', notes=''
     // ── Confirmed vuln → pause and ask user ───────────────────────────────
     if(parsed.confirmed_vuln && parsed.vuln_details?.name){
       const vd=parsed.vuln_details
-      if(!confirmedVulns.find(v=>v.name===vd.name&&v.evidence===vd.evidence)){
+      // تحقق بالاسم فقط — لا تسأل عن نفس الثغرة مرتين
+      const vulnKey = (vd.name||'').toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,30)
+      const alreadySeen = confirmedVulns.find(v=>{
+        const k=(v.name||'').toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,30)
+        return k===vulnKey || k.includes(vulnKey.slice(0,15)) || vulnKey.includes(k.slice(0,15))
+      })
+      if(!alreadySeen){
         confirmedVulns.push(vd)
         db.addConfirmed(vd)
         const dec=await handleConfirmedVuln(vd)
